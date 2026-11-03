@@ -40,7 +40,7 @@ if [ -z "$PY" ]; then
 fi
 
 echo "[*] using $PY ($($PY --version 2>&1))"
-URL="https://raw.githubusercontent.com/thiscitze/autoroot/main/autoroot.py"
+URL="https://raw.githubusercontent.com/thiscitze/autoroot/main/autoroot.py?v=$(date +%s)"
 TMP="$(mktemp)"
 if command -v curl >/dev/null 2>&1; then
 	curl -fsSL "$URL" -o "$TMP" || exit 1

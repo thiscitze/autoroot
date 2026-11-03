@@ -75,7 +75,7 @@ Colors: green = success, yellow = skipped/unverified, red = failed/blocked.
   sudo) and then starts autoroot:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh?v=$(date +%s)" | bash
 ```
 
 If `curl` itself is missing:
