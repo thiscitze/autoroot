@@ -42,6 +42,7 @@ import urllib.request
 
 COLOR = sys.stdout.isatty()
 VERBOSE = False
+CAPTURE = None
 
 BANNER = r"""
   #####  #   #  #  ####   ####  #  #####  #####  #####
@@ -83,7 +84,10 @@ def bold(text: str) -> str:
 
 
 def log(text: str) -> None:
-    print(text, flush=True)
+    if CAPTURE is not None:
+        CAPTURE.append(str(text))
+    else:
+        print(text, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +460,7 @@ class Module:
         self.ran = False
         self.skipped = False
         self.failed = False
+        self.reason = ""
 
 
 MODULES = []
@@ -1205,8 +1210,6 @@ def m_recon():
     else:
         user = os.environ.get("USER", "?")
     groups = ",".join(sorted(user_groups())) or "-"
-    log(f"      user={user} uid={os.getuid()} kernel={platform.release()} "
-        f"distro={distro_id() or '?'}")
     log(f"      groups={groups}")
     if VERBOSE:
         sh("id; echo; sudo -n -l 2>&1 | head -40; echo; uname -a; echo; "
@@ -1221,32 +1224,57 @@ def m_recon():
 UNTRUSTED = False
 
 
+def _capture_reason(captured: list) -> str:
+    for line in reversed(captured):
+        text = str(line).strip()
+        if text:
+            text = re.sub(r"^\[[!+\-*]\]\s*", "", text)
+            return text[:100]
+    return "not applicable"
+
+
 def run_module(mod: Module) -> None:
-    log("")
-    log(bold(f"[{mod.key}] ") + info(mod.title))
-    if VERBOSE:
-        log(f"  check: {mod.check}")
+    global CAPTURE
     if mod.untrusted and not UNTRUSTED:
-        log(warn("  skipped: untrusted (--allow-untrusted)"))
         mod.skipped = True
+        mod.reason = "untrusted (use --allow-untrusted)"
         return
     if mod.post and not root():
-        log(warn("  skipped: post step requires root"))
         mod.skipped = True
+        mod.reason = "post step requires root"
         return
+
+    CAPTURE = []
     try:
         mod.ran = True
         applicable = mod.fn()
-        if applicable is False:
-            mod.skipped = True
-            log(warn("  skipped"))
-        else:
-            log(ok("  done"))
     except KeyboardInterrupt:
+        CAPTURE = None
         raise
     except Exception as exc:  # noqa: BLE001
+        captured = CAPTURE
+        CAPTURE = None
         mod.failed = True
+        mod.reason = str(exc)[:100]
+        log("")
+        log(bold(f"[{mod.key}] ") + info(mod.title))
+        for line in captured:
+            log(line)
         log(bad(f"  error: {exc}"))
+        return
+
+    captured = CAPTURE
+    CAPTURE = None
+    if applicable is False:
+        mod.skipped = True
+        mod.reason = _capture_reason(captured)
+        return
+
+    log("")
+    log(bold(f"[{mod.key}] ") + info(mod.title))
+    for line in captured:
+        log(line)
+    log(ok("  done"))
     if root():
         log(ok("  current process is root"))
         if sys.stdin.isatty():
@@ -1340,11 +1368,19 @@ def main(argv=None) -> int:
         0 if m.key == "recon" else 1 if m.key in high else 2
     ))
 
-    log(bold("autoroot - lab privilege-escalation runner"))
-    log(f"user   : {os.getuid()} ({os.environ.get('USER', '?')})")
-    log(f"kernel : {platform.release()}")
-    log(f"distro : {distro_id() or 'unknown'}")
-    log(f"work   : {WORK}")
+    if pwd is not None:
+        try:
+            user = pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            user = os.environ.get("USER", "?")
+    else:
+        user = os.environ.get("USER", "?")
+    host = platform.node() or "?"
+    pretty = os_release().get("PRETTY_NAME") or distro_id() or "unknown"
+    log(f"  {user}@{host}")
+    log(f"  {pretty} | kernel {platform.release()} | uid {os.getuid()}")
+    if VERBOSE:
+        log(f"  work: {WORK}")
     log("")
 
     if root():
@@ -1362,22 +1398,32 @@ def main(argv=None) -> int:
 
     log("")
     log(bold("SUMMARY"))
-    for mod in selected:
-        if mod.ran and not mod.skipped and not mod.failed:
-            state = ok("ran")
-        elif mod.skipped:
-            state = warn("skipped")
-        elif mod.failed:
-            state = bad("failed")
-        else:
-            state = warn("not run")
-        log(f"  {mod.key:<24} {state}")
-    log("")
-    if not root():
-        log(warn("Parent process is still unprivileged. A child exploit "
-                 "cannot elevate this shell."))
-        log("Use a module that leaves a SUID shell or run the exploit "
-            "interactively.")
+    ran = [m for m in selected if m.ran and not m.skipped and not m.failed]
+    skipped = [m for m in selected if m.skipped]
+    failed = [m for m in selected if m.failed]
+    log(f"  ran={len(ran)}  skipped={len(skipped)}  failed={len(failed)}")
+
+    if failed:
+        log("")
+        log(bold("  FAILED"))
+        for mod in failed:
+            log(f"    {mod.key:<24} {bad(mod.reason or 'error')}")
+
+    if skipped:
+        log("")
+        log(bold("  SKIPPED"))
+        for mod in skipped:
+            reason = (mod.reason or "not applicable")[:80]
+            log(f"    {mod.key:<24} {paint(reason, '2')}")
+
+    if ran:
+        log("")
+        log(bold("  RAN"))
+        log("    " + ", ".join(m.key for m in ran))
+        log("")
+        log(warn("  Parent shell is still unprivileged; a child exploit "
+                 "cannot elevate it."))
+        log("  Use a SUID-shell module or run the exploit interactively.")
     return 0
 
 

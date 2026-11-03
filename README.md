@@ -53,8 +53,10 @@ compile-based modules will skip; there is no userspace trick around that.
 
 ## Output
 
-Default output is compact: a THISCITZE banner, environment line, one line per
-module, and a summary. Use `--verbose` to see every command and full output.
+Default output is compact: a THISCITZE banner, environment line, one block per
+applicable module, and a summary. Modules that are not applicable are grouped
+under `SKIPPED` with a one-line reason instead of a full block. Use
+`--verbose` to see every command and full output.
 
 ```bash
 python3 autoroot.py --color always
