@@ -50,19 +50,28 @@ MODULE_OUT = []
 LOG_PATH = ""
 LOG_FH = None
 
-BANNER = r"""
-  #####  #   #  #  ####   ####  #  #####  #####  #####
-    #    #   #  #  #     #      #    #       #    #
-    #    #####  #   ###   ###   #    #      #     ####
-    #    #   #  #      #     #  #    #     #      #
-    #    #   #  #  ####   ####   #    #     #      #####
-"""
+ENC = (getattr(sys.stdout, "encoding", "") or "").lower()
+UTF8 = "utf" in ENC
 
 
-def print_banner() -> None:
-    print(paint(BANNER, "96"))
-    print(paint("        autoroot - Linux privilege escalation (lab only)", "1"))
-    print()
+def _u(uni, ascii_):
+    return uni if UTF8 else ascii_
+
+
+# 6-row ASCII wordmark, one key per letter of THISCITZE.
+FONT = {
+    "T": (" _____ ", "|_   _|", "  | |  ", "  | |  ", "  | |  ", "  |_|  "),
+    "H": (" _   _ ", "| | | |", "| |_| |", "|  _  |", "| | | |", "|_| |_|"),
+    "I": (" ___ ", "|_ _|", " | | ", " | | ", " | | ", "|___|"),
+    "S": (" ____  ", "/ ___| ", "\\___ \\ ", " ___) |", "|____/ ", "       "),
+    "C": ("  ____ ", " / ___|", "| |    ", "| |___ ", " \\____|", "       "),
+    "Z": (" _____", "|__  /", "  / / ", " / /_ ", "/____|", "      "),
+    "E": (" _____ ", "| ____|", "|  _|  ", "| |___ ", "|_____|", "       "),
+}
+BRAND = "THISCITZE"
+GRADIENT = ("1;38;5;75", "1;38;5;81", "1;38;5;105", "1;38;5;111",
+            "1;38;5;141", "1;38;5;147", "1;38;5;177", "1;38;5;183",
+            "1;38;5;213")
 
 
 def paint(text: str, code: str) -> str:
@@ -70,23 +79,56 @@ def paint(text: str, code: str) -> str:
 
 
 def ok(text: str) -> str:
-    return paint(text, "92")
+    return paint(text, "38;5;82")
 
 
 def bad(text: str) -> str:
-    return paint(text, "91")
+    return paint(text, "38;5;203")
 
 
 def warn(text: str) -> str:
-    return paint(text, "93")
+    return paint(text, "38;5;214")
 
 
 def info(text: str) -> str:
-    return paint(text, "96")
+    return paint(text, "38;5;81")
 
 
-def bold(text: str) -> str:
-    return paint(text, "1")
+def dim(text: str) -> str:
+    return paint(text, "38;5;244")
+
+
+def brand_rows():
+    rows = [""] * 6
+    for i, ch in enumerate(BRAND):
+        glyph = FONT[ch]
+        width = max(len(line) for line in glyph)
+        for r in range(6):
+            rows[r] += paint(glyph[r].ljust(width), GRADIENT[i]) + "  "
+    return [row.rstrip() for row in rows]
+
+
+def print_banner() -> None:
+    cols = shutil.get_terminal_size((80, 24)).columns
+    if cols >= 78:
+        for row in brand_rows():
+            print("  " + row)
+    else:
+        print("  " + paint(BRAND, "1;38;5;111"))
+    print()
+    print("  " + paint("autoroot", "1;38;5;75")
+          + paint("  " + _u("\u00b7", "-") + "  linux privilege escalation",
+                  "38;5;245"))
+    print("  " + paint(_u("\u2500", "-") * 52, "38;5;238"))
+    print()
+
+
+def section(title: str) -> None:
+    rule = _u("\u2500", "-") * max(4, 48 - len(title))
+    print("")
+    print("  " + paint(_u("\u258c", "|"), "38;5;111") + " "
+          + paint(title.upper(), "1;38;5;252") + "  " + paint(rule, "38;5;238"))
+
 
 
 def log(text: str) -> None:
@@ -1339,14 +1381,14 @@ UNTRUSTED = False
 
 
 def _sym(uni, ascii_):
-    enc = (getattr(sys.stdout, "encoding", "") or "").lower()
-    return uni if "utf" in enc else ascii_
+    return _u(uni, ascii_)
 
 
 SYM_OK = _sym("\u2714", "+")
 SYM_FAIL = _sym("\u2718", "x")
 SYM_SKIP = _sym("\u00b7", "-")
 SYM_ROOT = _sym("\u2605", "*")
+SPIN = _sym("\u25d0", "*")
 
 
 def _root_evidence():
@@ -1397,20 +1439,41 @@ def _write_module_log(mod, captured):
                  mod.reason or ""))
 
 
-def _show_status(mod):
+def _show_status(mod, elapsed=0.0):
     if mod.root_lines:
-        head = "  " + ok(SYM_ROOT + " " + mod.key.ljust(22))
-        tail = " " + bold(ok(mod.root_lines[0][:66]))
+        sym, code = SYM_ROOT, "1;38;5;213"
+        detail, dcode = mod.root_lines[0][:44], "1;38;5;213"
     elif mod.skipped:
-        head = "  " + paint(SYM_SKIP + " " + mod.key.ljust(22), "2")
-        tail = " " + paint((mod.reason or "skipped")[:60], "2")
+        sym, code = SYM_SKIP, "38;5;242"
+        detail, dcode = (mod.reason or "skipped")[:44], "38;5;242"
     elif mod.failed:
-        head = "  " + bad(SYM_FAIL + " " + mod.key.ljust(22))
-        tail = " " + bad((mod.reason or "failed")[:60])
+        sym, code = SYM_FAIL, "38;5;203"
+        detail, dcode = (mod.reason or "failed")[:44], "38;5;203"
     else:
-        head = "  " + ok(SYM_OK + " " + mod.key.ljust(22))
-        tail = " " + paint(mod.title, "2")
-    print(head + tail, flush=True)
+        sym, code = SYM_OK, "38;5;82"
+        detail, dcode = mod.title[:44], "38;5;245"
+    line = ("  " + paint(sym, code) + " "
+            + paint(mod.key.ljust(22), "38;5;252") + " "
+            + paint(detail, dcode))
+    if mod.ran and elapsed >= 0.05:
+        line += " " * max(2, 46 - len(detail))
+        line += paint("%4.1fs" % elapsed, "38;5;238")
+    print(line, flush=True)
+
+
+def _spin(mod):
+    if not COLOR or not sys.stdout.isatty() or VERBOSE:
+        return
+    sys.stdout.write("\r\033[K  " + paint(SPIN, "38;5;111") + " "
+                     + paint(mod.key.ljust(22), "38;5;245"))
+    sys.stdout.flush()
+
+
+def _spin_clear():
+    if not COLOR or not sys.stdout.isatty() or VERBOSE:
+        return
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
 
 
 def _make_marker():
@@ -1444,6 +1507,8 @@ def run_module(mod: Module) -> None:
     CAPTURE = []
     del MODULE_OUT[:]
     marker = _make_marker()
+    _spin(mod)
+    t0 = time.time()
     try:
         mod.ran = True
         applicable = mod.fn()
@@ -1457,17 +1522,19 @@ def run_module(mod: Module) -> None:
         mod.reason = str(exc)[:100]
         mod.root_lines = _root_evidence()
         _write_module_log(mod, captured)
+        _spin_clear()
         if VERBOSE:
             for line in captured:
                 log("      " + text_of(line))
             log(bad("  error: %s" % exc))
-        _show_status(mod)
+        _show_status(mod, time.time() - t0)
         return
 
     captured = CAPTURE
     CAPTURE = None
     mod.output = [text_of(x) for x in captured]
     mod.root_lines = _root_evidence()
+    elapsed = time.time() - t0
 
     if applicable is False:
         reason = _capture_reason(captured)
@@ -1478,7 +1545,8 @@ def run_module(mod: Module) -> None:
             mod.skipped = True
             mod.reason = reason
         _write_module_log(mod, captured)
-        _show_status(mod)
+        _spin_clear()
+        _show_status(mod, elapsed)
         return
 
     if marker and not root():
@@ -1487,7 +1555,8 @@ def run_module(mod: Module) -> None:
             if line not in mod.root_lines:
                 mod.root_lines.append(line)
     _write_module_log(mod, captured)
-    _show_status(mod)
+    _spin_clear()
+    _show_status(mod, elapsed)
     if mod.root_lines:
         for ev in mod.root_lines[1:]:
             print("      " + ok(ev), flush=True)
@@ -1555,6 +1624,7 @@ def main(argv=None) -> int:
         ordered = sorted(MODULES, key=lambda m: (
             0 if m.key == "recon" else 1 if m.key in high else 2
         ))
+        section("modules")
         for mod in ordered:
             flags = []
             if mod.untrusted:
@@ -1563,8 +1633,13 @@ def main(argv=None) -> int:
                 flags.append("post")
             if mod.lab:
                 flags.append("lab")
-            suffix = f" [{'/'.join(flags)}]" if flags else ""
-            log(f"  {mod.key:<24} {mod.title}{suffix}")
+            suffix = "  [" + "/".join(flags) + "]" if flags else ""
+            line = ("  " + paint(mod.key.ljust(24), "38;5;252")
+                    + dim(mod.title))
+            if suffix:
+                line += paint(suffix, "38;5;141")
+            print(line, flush=True)
+        print("")
         return 0
 
     if platform.system() != "Linux":
@@ -1608,75 +1683,90 @@ def main(argv=None) -> int:
         user = os.environ.get("USER", "?")
     host = platform.node() or "?"
     pretty = os_release().get("PRETTY_NAME") or distro_id() or "unknown"
-    log(f"  {user}@{host}")
-    log(f"  {pretty} | kernel {platform.release()} | uid {os.getuid()}")
+    log("  " + paint("%s@%s" % (user, host), "1;38;5;255"))
+    log("  " + paint(pretty, "38;5;250")
+        + paint("  " + _u("\u00b7", "-") + "  ", "38;5;238")
+        + paint("kernel " + platform.release(), "38;5;250")
+        + paint("  " + _u("\u00b7", "-") + "  ", "38;5;238")
+        + paint("uid %d" % os.getuid(), "38;5;250"))
     log_write("autoroot run %s\n%s@%s | %s | kernel %s | uid %d\n"
               % (time.strftime("%Y-%m-%d %H:%M:%S"), user, host, pretty,
                  platform.release(), os.getuid()))
     if VERBOSE:
-        log(f"  work: {WORK}")
-    log("")
+        log(dim("  work: " + WORK))
 
     if root():
-        log(ok("Already root; running recon only."))
+        log("")
+        log(warn("  already root; recon only"))
         m_recon()
         return 0
 
     if not args.dry_run:
-        log("")
-        log(info("running all modules (untrusted payloads remain off)"))
-        log("")
+        section("run  %d modules" % len(selected))
 
     for mod in selected:
         run_module(mod)
 
-    log("")
-    log(bold("SUMMARY"))
     ran = [m for m in selected if m.ran and not m.skipped and not m.failed]
     skipped = [m for m in selected if m.skipped]
     failed = [m for m in selected if m.failed]
     roots = [m for m in selected if m.root_lines]
-    log(f"  ran={len(ran)}  failed={len(failed)}  skipped={len(skipped)}"
-        + ("  root=%d" % len(roots) if roots else ""))
+
+    section("summary")
+    stats = [("ran", len(ran), "38;5;82"), ("failed", len(failed), "38;5;203"),
+             ("skipped", len(skipped), "38;5;244")]
+    print("  " + "   ".join(dim(name) + " " + paint(str(val), code)
+                            for name, val, code in stats), flush=True)
 
     if roots:
-        log("")
-        log(bold(ok("  ROOT")))
+        section("root")
         for mod in roots:
             for i, ev in enumerate(mod.root_lines):
-                mark = (SYM_ROOT + " " + mod.key) if i == 0 else "  " + " " * len(mod.key)
-                log(f"    {mark:<24} {ok(ev[:70])}")
-        log("")
-        log(info("  interactive shell: ./autoroot --raw --only "
-                 + roots[0].key))
+                pad = " " * max(1, 23 - len(mod.key))
+                if i == 0:
+                    mark = ("  " + paint(SYM_ROOT, "1;38;5;213") + " "
+                            + paint(mod.key, "1;38;5;213"))
+                else:
+                    mark = "  " + " " * (len(mod.key) + 2)
+                print(mark + pad + paint(ev[:60], "38;5;213"), flush=True)
+        suid = [e.split(": ", 1)[1] for m in roots for e in m.root_lines
+                if e.startswith("SUID root file: ")]
+        print("")
+        if suid:
+            print("  " + dim("root now: ") + info(suid[0] + " -p"), flush=True)
+        else:
+            print("  " + dim("interactive: ")
+                  + info("./autoroot --raw --only " + roots[0].key),
+                  flush=True)
 
     if failed:
-        log("")
-        log(bold("  FAILED"))
+        section("failed")
         for mod in failed:
-            log(f"    {mod.key:<24} {bad(mod.reason or 'error')}")
+            print("  " + paint(mod.key.ljust(22), "38;5;252")
+                  + " " + bad((mod.reason or "error")[:56]), flush=True)
 
     if skipped:
-        log("")
-        log(bold("  SKIPPED"))
+        section("skipped")
         for mod in skipped:
-            reason = (mod.reason or "not applicable")[:80]
-            log(f"    {mod.key:<24} {paint(reason, '2')}")
+            print("  " + paint(mod.key.ljust(22), "38;5;245")
+                  + " " + dim((mod.reason or "not applicable")[:56]), flush=True)
 
     if ran:
-        log("")
-        log(bold("  RAN"))
-        log("    " + ", ".join(m.key for m in ran))
+        section("ran")
+        text = ", ".join(m.key for m in ran)
+        for line in textwrap.wrap(text, 62):
+            print("  " + paint(line, "38;5;245"), flush=True)
 
-    log("")
+    print("")
     if roots:
-        log(ok("  Root shell detected above; rerun it with --raw for an "
-               "interactive session."))
+        print("  " + ok(SYM_ROOT + " root shell detected") + dim(
+            "  rerun with --raw for an interactive session"), flush=True)
     else:
-        log(warn("  No module proved root here. A child exploit cannot "
-                 "elevate the parent shell."))
-        log("  Use a SUID-shell module or run the exploit with --raw.")
-    log(paint("  full log: " + (LOG_PATH or "unavailable"), "2"))
+        print("  " + warn("no module proved root") + dim(
+            "  a child exploit cannot elevate the parent shell"), flush=True)
+        print("  " + dim("try: ./autoroot --raw   or a SUID-shell module"),
+              flush=True)
+    print("  " + dim("log: " + (LOG_PATH or "unavailable")), flush=True)
     log_write("\nrun finished: roots=%s\n"
               % (", ".join(m.key for m in roots) or "none"))
     return 0

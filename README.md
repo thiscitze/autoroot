@@ -71,25 +71,42 @@ compile-based modules will skip; there is no userspace trick around that.
 
 ## Output
 
-Default output is quiet and compact: banner, environment line, one status line
-per module, then a summary.
+Default output is a colored wordmark, environment line, one status line per
+module, and a sectioned summary.
 
 ```
-  ✔ recon                  recon
-  ✘ pwnkit                 pkexec yok veya SUID degil
-  ★ dirtypipe              uid=0(root) gid=0(root)
-  ran=30  failed=18  skipped=0  root=1
+  THISCITZE            <- 6-row ASCII wordmark, per-letter gradient
+  autoroot  ·  linux privilege escalation
+  ────────────────────────────────────────────────
+
+  root@host
+  Debian GNU/Linux 10  ·  kernel 4.19.0-21-amd64  ·  uid 1000
+
+  ▌ RUN  52 MODULES  ────────────────────────────────
+  ✔  recon                  recon                              0.1s
+  ✘  pwnkit                 pkexec yok veya SUID degil          0.3s
+  ★  dirtypipe              uid=0(root) gid=0(root) ...         1.8s
+
+  ▌ SUMMARY  ───────────────────────────────────────
+  ran 30   failed 18   skipped 0
+  ▌ ROOT
+  ★ dirtypipe               uid=0(root) gid=0(root) ...
+  interactive: ./autoroot --raw --only dirtypipe
 ```
 
+- Each module gets one line: `✔` ran, `✘` failed (reason), `·` skipped,
+  `★` root proof, plus elapsed time.
+- While a module runs, a single-line spinner replaces the terminal line (TTY
+  only), so long downloads do not scroll the screen.
+- Colors use 256-color ANSI with a cyan→violet ramp; `--color auto` (default)
+  only colors a TTY, `--color always|never` forces it.
+- The wordmark spells `THISCITZE`; on terminals narrower than 76 columns it
+  collapses to a one-line brand so nothing wraps.
 - Every exploit command runs with `stdin=/dev/null`, `stdout+stderr` piped, so
   compiler noise, BPF verifier dumps, `su` usage text and `tar` warnings never
   reach the terminal. They go to the log file instead.
 - Full transcript: `~/.cache/autoroot/autoroot-YYYYmmdd-HHMMSS.log` (printed
   at the end; falls back to `/dev/shm` or the system temp dir).
-- When a module's output proves root (`uid=0(root)`, "root shell", ...), it is
-  listed with `★` in the run and under `SUMMARY -> ROOT`, and autoroot prints
-  the exact follow-up command:
-  `./autoroot --raw --only <key>`.
 - `--verbose` prints each command plus its captured output under the status
   line. `--raw` gives the child process the real terminal (interactive root
   shells work, output is unfiltered).
@@ -99,9 +116,6 @@ python3 autoroot.py --color always
 python3 autoroot.py --verbose
 python3 autoroot.py --raw --only dirtypipe
 ```
-
-Colors: green = ran/ok, red = failed/blocked, dim = skipped, bold = root.
-`--color auto` (default) colors only when stdout is a TTY.
 
 ## git/curl/python fallbacks
 
