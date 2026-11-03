@@ -23,6 +23,8 @@ python3 autoroot.py --dry-run
 - `--yes` - required to run anything.
 - `--only KEY` - run one module.
 - `--dry-run` - print commands without executing.
+- `--verbose` - show every command and full output.
+- `--color auto|always|never` - ANSI color mode.
 - `--allow-untrusted` - enable `curl | python3` payloads from unknown hosts.
 - `--labs` - include Docker/service lab modules.
 - `--timeout N` - per-command timeout (default 45s; 0 = no timeout).
@@ -46,6 +48,19 @@ VMs:
 
 If the box has no compiler, no package manager, and no writable exec mount,
 compile-based modules will skip; there is no userspace trick around that.
+
+## Output
+
+Default output is compact: a THISCITZE banner, environment line, one line per
+module, and a summary. Use `--verbose` to see every command and full output.
+
+```bash
+python3 autoroot.py --color always
+python3 autoroot.py --verbose
+```
+
+Colors: green = success, yellow = skipped/unverified, red = failed/blocked.
+`--color auto` (default) colors only when stdout is a TTY.
 
 ## git/curl/python fallbacks
 

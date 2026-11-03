@@ -44,6 +44,21 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 COLOR = sys.stdout.isatty()
+VERBOSE = False
+
+BANNER = r"""
+  #####  #   #  #  ####   ####  #  #####  #####  #####
+    #    #   #  #  #     #      #    #       #    #
+    #    #####  #   ###   ###   #    #      #     ####
+    #    #   #  #      #     #  #    #     #      #
+    #    #   #  #  ####   ####   #    #     #      #####
+"""
+
+
+def print_banner() -> None:
+    print(paint(BANNER, "96"))
+    print(paint("        autoroot - Linux privilege escalation (lab only)", "1"))
+    print()
 
 
 def paint(text: str, code: str) -> str:
@@ -258,9 +273,10 @@ def download(url: str, dest: str, cwd: str | None = None) -> int:
 
 def sh(cmd: str, desc: str = "", cwd: str | None = None,
        timeout: int | None = None) -> int:
-    if desc:
-        log(f"    {desc}")
-    log(f"      $ {cmd}")
+    if VERBOSE or DRY:
+        if desc:
+            log(f"    {desc}")
+        log(f"      $ {cmd}")
     if DRY:
         return 0
 
@@ -315,6 +331,8 @@ def sh(cmd: str, desc: str = "", cwd: str | None = None,
                         break
                 except OSError:
                     continue
+    if rc != 0 and not VERBOSE:
+        log(bad(f"      failed ({rc})"))
     return rc
 
 
@@ -716,7 +734,8 @@ def m_sudo():
     if not out or "NOPASSWD" not in out:
         log(warn("      no passwordless sudo entry"))
         return False
-    log(out)
+    if VERBOSE:
+        log(out)
     for line in out.splitlines():
         if "NOPASSWD" not in line:
             continue
@@ -1173,7 +1192,20 @@ def m_post():
 
 @module("recon", "recon", "always")
 def m_recon():
-    sh("id; echo; sudo -n -l 2>&1 | head -40; echo; uname -a; echo; cat /etc/os-release | head -8", "recon")
+    if pwd is not None:
+        try:
+            user = pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            user = os.environ.get("USER", "?")
+    else:
+        user = os.environ.get("USER", "?")
+    groups = ",".join(sorted(user_groups())) or "-"
+    log(f"      user={user} uid={os.getuid()} kernel={platform.release()} "
+        f"distro={distro_id() or '?'}")
+    log(f"      groups={groups}")
+    if VERBOSE:
+        sh("id; echo; sudo -n -l 2>&1 | head -40; echo; uname -a; echo; "
+           "cat /etc/os-release | head -8", "recon")
     return True
 
 
@@ -1186,8 +1218,9 @@ UNTRUSTED = False
 
 def run_module(mod: Module) -> None:
     log("")
-    log(bold(f"[{mod.key}] {mod.title}"))
-    log(f"  check: {mod.check}")
+    log(bold(f"[{mod.key}] ") + info(mod.title))
+    if VERBOSE:
+        log(f"  check: {mod.check}")
     if mod.untrusted and not UNTRUSTED:
         log(warn("  skipped: untrusted (--allow-untrusted)"))
         mod.skipped = True
@@ -1201,6 +1234,9 @@ def run_module(mod: Module) -> None:
         applicable = mod.fn()
         if applicable is False:
             mod.skipped = True
+            log(warn("  skipped"))
+        else:
+            log(ok("  done"))
     except KeyboardInterrupt:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -1221,6 +1257,11 @@ def main(argv=None) -> int:
                    help="confirm running the modules")
     p.add_argument("--dry-run", action="store_true",
                    help="print commands without running them")
+    p.add_argument("--verbose", action="store_true",
+                   help="show every command and detailed output")
+    p.add_argument("--color", choices=("auto", "always", "never"),
+                   default="auto",
+                   help="ANSI color output (default: auto)")
     p.add_argument("--allow-untrusted", action="store_true",
                    help="allow curl | python3 payloads from unknown hosts")
     p.add_argument("--labs", action="store_true",
@@ -1231,6 +1272,18 @@ def main(argv=None) -> int:
     p.add_argument("--timeout", type=int, default=TIMEOUT,
                    help=f"per-command timeout (default: {TIMEOUT}s, 0 = none)")
     args = p.parse_args(argv)
+
+    global COLOR, VERBOSE
+    VERBOSE = args.verbose
+    if args.color == "always":
+        COLOR = True
+    elif args.color == "never":
+        COLOR = False
+    else:
+        COLOR = sys.stdout.isatty()
+    if os.name == "nt" and COLOR:
+        os.system("")
+    print_banner()
 
     if args.list:
         high = {
