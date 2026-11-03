@@ -28,6 +28,25 @@ python3 autoroot.py --dry-run
 - `--timeout N` - per-command timeout (default 45s; 0 = no timeout).
 - `--allow-untrusted` is off by default.
 
+## GCC and permission bypasses
+
+The runner tries to keep compile/run steps working on minimal or locked-down
+VMs:
+
+- **Compiler fallback:** `gcc` -> `cc` -> `clang` -> `tcc`.
+- **Package install:** if none exist, it tries `sudo -n` with apt/dnf/yum/apk/
+  pacman/zypper (passwordless sudo only; no prompt).
+- **Workdir selection:** `$AUTOROOT_WORK`, `~/.cache/autoroot`, `/dev/shm`,
+  `/var/tmp`, `/tmp`; it skips mounts marked `noexec`.
+- **noexec retry:** if a compiled binary returns 126 (permission/exec denied),
+  it copies the binary to `~/.cache/autoroot-exec` or `/dev/shm/autoroot-exec`
+  and retries.
+- **Git/tar/curl/make:** missing tools are installed with the same
+  passwordless-sudo path.
+
+If the box has no compiler, no package manager, and no writable exec mount,
+compile-based modules will skip; there is no userspace trick around that.
+
 ## Modules
 
 | Key | Target |
