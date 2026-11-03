@@ -20,6 +20,20 @@ PY=""
 say() { printf '%s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Some shells (web terminals, `sudo -u`, cron) run with HOME unset; `set -u`
+# would abort on the first "$HOME".  Recover it from the password database.
+if [ -z "${HOME:-}" ] || [ ! -d "${HOME:-}" ]; then
+	HOME="$(cd ~ 2>/dev/null && pwd)" || HOME=""
+	if [ -z "$HOME" ] || [ ! -d "$HOME" ]; then
+		HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+	fi
+	if [ -z "$HOME" ] || [ ! -d "$HOME" ]; then
+		HOME="/tmp"
+	fi
+	export HOME
+	say "[*] HOME was unset; using $HOME"
+fi
+
 py_ok() {
 	[ -n "${1:-}" ] && [ -x "$1" ] || return 1
 	"$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' \

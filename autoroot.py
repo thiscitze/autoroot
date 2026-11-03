@@ -1822,6 +1822,12 @@ def main(argv=None) -> int:
         log(bad("autoroot: Linux target required"))
         return 2
 
+    if not os.environ.get("HOME"):
+        try:
+            os.environ["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
+        except (KeyError, AttributeError):
+            os.environ["HOME"] = tempfile.gettempdir()
+
     DRY = args.dry_run
     TIMEOUT = args.timeout if args.timeout > 0 else 10 ** 9
     UNTRUSTED = not args.no_untrusted
