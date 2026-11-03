@@ -19,8 +19,9 @@ python3 autoroot.py --allow-untrusted --labs
 python3 autoroot.py --dry-run
 ```
 
-- No flags: run all safe modules.
+- No flags: try every module regardless of kernel/distro checks.
 - `--list` - show modules and flags.
+- `--safe` - honour kernel/distro compatibility checks.
 - `--only KEY` - run one module.
 - `--dry-run` - print commands without executing.
 - `--verbose` - show every command and full output.
@@ -149,6 +150,9 @@ wget -qO- https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh
   and example commands, but do not modify `/etc/passwd` or cron jobs.
 - `lxd_group` prints the manual container sequence; it does not pull images
   or start containers automatically.
+- By default every module is attempted even if the kernel/distro looks out
+  of range (`--safe` restores the checks). This can panic the kernel; use a
+  disposable VM.
 - Kernel/distro checks are coarse; a module can still fail on a patched or
   differently configured host.
 - `post_suid` is not a privilege escalation: `cp /bin/bash /tmp/bash` only

