@@ -219,9 +219,17 @@ def clean_lines(output: str, limit=40):
 
 WORK = ""
 CC = "gcc"
+_CC_OK = False
 _COMPILER_CHECKED = False
 TIMEOUT = int(os.environ.get("AUTOROOT_TIMEOUT", "45"))
 DRY = False
+
+ZIG_VERSION = "0.13.0"
+ZIG_ARCH = {
+    "x86_64": "x86_64", "amd64": "x86_64",
+    "aarch64": "aarch64", "arm64": "aarch64",
+    "armv7l": "armv7a", "armv7": "armv7a",
+}
 
 
 def mount_options(path: str) -> str:
@@ -315,23 +323,165 @@ def install_packages() -> bool:
     return False
 
 
+def _zig_cached():
+    for base in (os.path.expanduser("~/.cache/autoroot-zig"),
+                 "/dev/shm/autoroot-zig", "/tmp/autoroot-zig"):
+        try:
+            names = sorted(os.listdir(base), reverse=True)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(base, name, "zig")
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+    return ""
+
+
+def _fetch(url, dest):
+    try:
+        urllib.request.urlretrieve(url, dest)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log_write("download failed %s: %s\n" % (url, exc))
+        return False
+
+
+def _install_zig_tarball(arch):
+    """Portable static zig toolchain, usable as `zig cc -target ...-musl`."""
+    for base in (os.path.expanduser("~/.cache/autoroot-zig"),
+                 "/dev/shm/autoroot-zig", "/tmp/autoroot-zig"):
+        try:
+            os.makedirs(base, mode=0o700, exist_ok=True)
+            if "noexec" in mount_options(base):
+                continue
+            url = ("https://ziglang.org/download/%s/zig-linux-%s-%s.tar.xz"
+                   % (ZIG_VERSION, arch, ZIG_VERSION))
+            tmp = os.path.join(base, "zig.tar.xz")
+            if not _fetch(url, tmp):
+                continue
+            try:
+                with tarfile.open(tmp, "r:xz") as tf:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", DeprecationWarning)
+                        try:
+                            tf.extractall(base, filter="data")
+                        except TypeError:
+                            tf.extractall(base)
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            zig = _zig_cached()
+            if zig:
+                return zig
+        except Exception as exc:  # noqa: BLE001
+            log_write("zig extract failed: %s\n" % exc)
+    return ""
+
+
+def _install_zig_pip():
+    """Fallback: the `ziglang` wheel bundles the compiler."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet",
+             "--disable-pip-version-check", "--user", "ziglang"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    log_write("$ pip install ziglang\n%s\n[rc=%d]\n"
+              % (text_of(proc.stdout), proc.returncode))
+    if proc.returncode != 0:
+        return ""
+    return "%s -m ziglang" % PYEXE
+
+
+def _probe_compiler(cc_cmd):
+    """Compile-only probe: no-exec work dirs still count as success."""
+    src = os.path.join(WORK, ".cc_probe.c")
+    out = os.path.join(WORK, ".cc_probe")
+    try:
+        with open(src, "w", encoding="ascii") as fh:
+            fh.write("int main(void){return 0;}\n")
+        proc = subprocess.run(
+            ["bash", "-c", "%s %s -o %s"
+             % (cc_cmd, shlex.quote(src), shlex.quote(out))],
+            cwd=WORK, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    log_write("probe: %s\n%s\n[rc=%d]\n"
+              % (cc_cmd, text_of(proc.stdout), proc.returncode))
+    try:
+        ok_probe = proc.returncode == 0 and os.path.getsize(out) > 0
+    except OSError:
+        ok_probe = False
+    for path in (src, out):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return ok_probe
+
+
 def ensure_compiler() -> bool:
-    global CC, _COMPILER_CHECKED
+    global CC, _COMPILER_CHECKED, _CC_OK
+    if DRY:
+        _COMPILER_CHECKED = True
+        _CC_OK = True
+        return True
     if _COMPILER_CHECKED:
-        return bool(shutil.which(CC))
+        return _CC_OK
     _COMPILER_CHECKED = True
+
+    env_cc = os.environ.get("CC", "").strip()
+    if env_cc and shutil.which(env_cc.split()[0]):
+        CC = env_cc
+        _CC_OK = True
+        log(ok("  compiler: %s (env CC)" % CC))
+        return True
+
     for candidate in ("gcc", "cc", "clang", "tcc"):
         if shutil.which(candidate):
             CC = candidate
+            _CC_OK = True
             log(ok(f"  compiler: {CC}"))
             return True
+
     log(warn("  no C compiler; trying package manager (sudo -n)"))
     if install_packages():
         for candidate in ("gcc", "cc", "clang", "tcc"):
             if shutil.which(candidate):
                 CC = candidate
+                _CC_OK = True
                 log(ok(f"  compiler installed: {CC}"))
                 return True
+
+    arch = ZIG_ARCH.get(platform.machine().lower())
+    if arch:
+        log(warn("  still no compiler; fetching portable zig cc (~45MB)"))
+        zig = _zig_cached() or _install_zig_tarball(arch)
+        if zig:
+            cc_cmd = "%s cc -target %s-linux-musl" % (shlex.quote(zig), arch)
+            if _probe_compiler(cc_cmd):
+                CC = cc_cmd
+                _CC_OK = True
+                log(ok("  compiler: zig cc (portable, static)"))
+                return True
+        prefix = _install_zig_pip()
+        if prefix:
+            cc_cmd = "%s cc -target %s-linux-musl" % (prefix, arch)
+            if _probe_compiler(cc_cmd):
+                CC = cc_cmd
+                _CC_OK = True
+                log(ok("  compiler: ziglang (pip wheel)"))
+                return True
+
     log(bad("  compiler unavailable; compile-based modules will skip"))
     return False
 
@@ -496,6 +646,20 @@ def sh(cmd, desc="", cwd=None, timeout=None):
         return proc.returncode
 
     rc = _run(cmd)
+    if rc != 0 and " -o " in cmd and MODULE_OUT:
+        tail = MODULE_OUT[-1][1]
+        if "cannot find -l" in tail or "unable to find library" in tail:
+            # musl bundles libm/libpthread/libutil/libdl in libc; drop the
+            # explicit -l flags and retry once before giving up.
+            retry = cmd
+            for lib in ("-lutil", "-lpthread", "-lm", "-ldl", "-lrt",
+                        "-lcrypt"):
+                retry = re.sub(r"\s*" + re.escape(lib) + r"\b", "", retry)
+            if retry != cmd:
+                log(warn("      retrying without %s" % " ".join(
+                    l for l in ("-lutil", "-lpthread", "-lm", "-ldl",
+                                "-lrt", "-lcrypt") if l in cmd)))
+                rc = _run(retry)
     if rc == 126 and cmd.lstrip().startswith("./"):
         token = cmd.split()[0]
         src = os.path.join(cwd or WORK, token)
@@ -1663,8 +1827,9 @@ def main(argv=None) -> int:
     log_start()
     WORK = find_workdir()
     os.chmod(WORK, 0o700)
-    ensure_tools()
-    ensure_compiler()
+    if not DRY:
+        ensure_tools()
+        ensure_compiler()
 
     selected = [m for m in MODULES if not args.only or m.key == args.only]
     if args.only and not selected:

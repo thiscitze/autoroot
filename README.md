@@ -55,7 +55,15 @@ python3 autoroot.py --dry-run
 The runner tries to keep compile/run steps working on minimal or locked-down
 VMs:
 
-- **Compiler fallback:** `gcc` -> `cc` -> `clang` -> `tcc`.
+- **Compiler fallback:** `gcc` -> `cc` -> `clang` -> `tcc`; `$CC` overrides
+  the whole chain.
+- **Portable compiler:** if none exist and `sudo -n` install fails, it
+  downloads a static zig toolchain (0.13, ~45 MB) to `~/.cache/autoroot-zig`
+  and compiles with `zig cc -target <arch>-linux-musl`. Fallback to the
+  `ziglang` pip wheel if ziglang.org is unreachable. No root required.
+- **Bundled-lib retry:** if the linker reports `cannot find -lm` /
+  `-lpthread` / `-lutil` / `-ldl` / `-lrt`, those flags are stripped and the
+  compile is retried once (musl provides them from libc).
 - **Package install:** if none exist, it tries `sudo -n` with apt/dnf/yum/apk/
   pacman/zypper (passwordless sudo only; no prompt).
 - **Workdir selection:** `$AUTOROOT_WORK`, `~/.cache/autoroot`, `/dev/shm`,
@@ -68,6 +76,12 @@ VMs:
 
 If the box has no compiler, no package manager, and no writable exec mount,
 compile-based modules will skip; there is no userspace trick around that.
+
+The portable compiler cannot supply external development headers/libraries:
+modules that link `-lcap`, `-lmnl`, `-lnftnl` or `-luring` still need the distro
+`-dev` packages, and modules driven by `make` still need `make`. Everything
+that only needs libc (dirtypipe, dirtyfrag, fragnesia, pwnkit and most of the
+kernel PoCs) compiles with zig.
 
 ## Output
 
