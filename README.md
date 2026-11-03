@@ -51,6 +51,13 @@ compile-based modules will skip; there is no userspace trick around that.
 
 | Key | Target |
 |---|---|
+| `recon` | `id`, groups, `sudo -n -l`, kernel, distro |
+| `suid_gtfobins` | SUID scan + GTFOBins shell |
+| `sudo_nopasswd` | passwordless sudo + GTFOBins |
+| `docker_group` | Docker group host escape |
+| `lxd_group` | LXD group manual escape |
+| `writable_passwd` | writable `/etc/passwd` or `/etc/shadow` |
+| `writable_root_jobs` | writable cron/systemd/logrotate |
 | `pwnkit` | pkexec SUID (CVE-2021-4034) |
 | `dirtypipe` | kernel 5.8-5.16 (CVE-2022-0847) |
 | `gameover` | Ubuntu OverlayFS (CVE-2023-2640/32629) |
@@ -68,14 +75,27 @@ compile-based modules will skip; there is no userspace trick around that.
 | `cve2026_68398` | unknown |
 | `pwnkit2` | PwnKit second repo |
 | `cve2026_64600` | unknown |
+| `sudo_baron` | sudo Baron Samedit (CVE-2021-3156) |
+| `polkit_3560` | polkit (CVE-2021-3560) |
+| `looney` | Looney Tunables (CVE-2023-4911) |
+| `nft_1086` | nftables (CVE-2024-1086) |
+| `cve_2021_22555` | netfilter (CVE-2021-22555) |
+| `cve_2021_3493` | Ubuntu overlayfs (CVE-2021-3493) |
+| `cve_2022_0185` | fs_context (CVE-2022-0185) |
+| `cve_2022_2588` | cls_route (CVE-2022-2588) |
 | `untrusted_copyfail` | `copy.fail` remote script (untrusted) |
 | `untrusted_softechnology` | `softechnology.biz` remote script (untrusted) |
 | `mariadb_lab` | Docker MariaDB lab |
 | `post_suid` | SUID bash, only if already root |
-| `recon` | `id`, `sudo -n -l`, kernel, distro |
 
 ## Notes
 
+- High-value manual vectors (`suid_gtfobins`, `sudo_nopasswd`, `docker_group`,
+  `writable_passwd`, `writable_root_jobs`) run before kernel exploits.
+- `writable_passwd` and `writable_root_jobs` are checks: they print the vector
+  and example commands, but do not modify `/etc/passwd` or cron jobs.
+- `lxd_group` prints the manual container sequence; it does not pull images
+  or start containers automatically.
 - Kernel/distro checks are coarse; a module can still fail on a patched or
   differently configured host.
 - `post_suid` is not a privilege escalation: `cp /bin/bash /tmp/bash` only
