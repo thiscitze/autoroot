@@ -47,6 +47,26 @@ VMs:
 If the box has no compiler, no package manager, and no writable exec mount,
 compile-based modules will skip; there is no userspace trick around that.
 
+## git/curl/python fallbacks
+
+- **git missing:** `git clone` calls are transparently replaced by a
+  GitHub tarball download (`main` then `master`) using curl, wget, or
+  Python's `urllib`.
+- **curl missing:** direct downloads use wget or `urllib`; git clones still
+  work.
+- **python3 missing:** run the bootstrap, which installs Python (passwordless
+  sudo) and then starts autoroot:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh | bash
+```
+
+If `curl` itself is missing:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh | bash
+```
+
 ## Modules
 
 | Key | Target |
@@ -83,6 +103,20 @@ compile-based modules will skip; there is no userspace trick around that.
 | `cve_2021_3493` | Ubuntu overlayfs (CVE-2021-3493) |
 | `cve_2022_0185` | fs_context (CVE-2022-0185) |
 | `cve_2022_2588` | cls_route (CVE-2022-2588) |
+| `cve_2020_8835` | eBPF (CVE-2020-8835) |
+| `cve_2022_1015` | nftables (CVE-2022-1015) |
+| `cve_2023_0179` | nftables (CVE-2023-0179) |
+| `cve_2024_0582` | io_uring (CVE-2024-0582) |
+| `cve_2023_22809` | sudoedit (CVE-2023-22809) |
+| `cve_2024_48990` | needrestart (CVE-2024-48990) |
+| `cve_2021_44731` | snap-confine (CVE-2021-44731) |
+| `cve_2023_32233` | nftables (CVE-2023-32233) |
+| `cve_2022_0995` | watch_queue (CVE-2022-0995) |
+| `cve_2022_25636` | nftables (CVE-2022-25636) |
+| `cve_2022_27666` | ESP (CVE-2022-27666) |
+| `cve_2021_4204` | eBPF (CVE-2021-4204) |
+| `cve_2022_23222` | eBPF (CVE-2022-23222) |
+| `cve_2021_3490` | eBPF (CVE-2021-3490) |
 | `untrusted_copyfail` | `copy.fail` remote script (untrusted) |
 | `untrusted_softechnology` | `softechnology.biz` remote script (untrusted) |
 | `mariadb_lab` | Docker MariaDB lab |
