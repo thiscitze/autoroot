@@ -30,11 +30,12 @@ python3 autoroot.py --list
 python3 autoroot.py --only pwnkit
 python3 autoroot.py --timeout 90
 python3 autoroot.py --raw --only dirtypipe
-python3 autoroot.py --allow-untrusted --labs
+python3 autoroot.py --no-untrusted
 python3 autoroot.py --dry-run
 ```
 
-- No flags: try every module regardless of kernel/distro checks.
+- No flags: runs **every** module - kernel/distro checks ignored, lab modules
+  included, and the two remote `curl | python3` payloads executed.
 - `--list` - show modules and flags.
 - `--safe` - honour kernel/distro compatibility checks.
 - `--only KEY` - run one module.
@@ -43,10 +44,9 @@ python3 autoroot.py --dry-run
 - `--raw` - stream exploit output live. Needed when a module spawns an
   interactive root shell; also the noisy mode.
 - `--color auto|always|never` - ANSI color mode.
-- `--allow-untrusted` - enable `curl | python3` payloads from unknown hosts.
-- `--labs` - include Docker/service lab modules.
+- `--no-untrusted` - skip the two remote payloads from unverified hosts.
+- `--labs` - keep lab modules when `--safe` is used.
 - `--timeout N` - per-command timeout (default 45s; 0 = no timeout).
-- `--allow-untrusted` is off by default.
 - Requires Linux and Python 3.6+. If Python is older/missing, use
   `bootstrap.sh`.
 
@@ -91,7 +91,7 @@ module, and a sectioned summary.
   ran 30   failed 18   skipped 0
   ▌ ROOT
   ★ dirtypipe               uid=0(root) gid=0(root) ...
-  interactive: ./autoroot --raw --only dirtypipe
+  interactive: python3 autoroot.py --raw --only dirtypipe
 ```
 
 - Each module gets one line: `✔` ran, `✘` failed (reason), `·` skipped,
@@ -221,8 +221,8 @@ The standalone interpreter stays cached at
   differently configured host.
 - `post_suid` is not a privilege escalation: `cp /bin/bash /tmp/bash` only
   works if the script is already root.
-- The two `curl | python3` entries are disabled by default; the domains are
-  not verified. Enable only inside an isolated VM.
+- The two `curl | python3` entries run by default, like every other module;
+  the domains are not verified. Use `--no-untrusted` to skip them.
 - Many CVE-2026 entries are unverified public repos. Treat their titles as
   claims, not facts.
 - Root attribution is output-based: a module is marked `★` when its stdout

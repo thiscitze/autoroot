@@ -148,7 +148,15 @@ fi
 say "[*] python: $PY ($("$PY" --version 2>&1))"
 
 URL="https://raw.githubusercontent.com/thiscitze/autoroot/${REF}/autoroot.py?v=$(date +%s)"
-TMP="$(mktemp 2>/dev/null || echo "/tmp/autoroot.$$.py")"
+TMP=""
+for d in "$HOME/.cache/autoroot" "/dev/shm/autoroot" "/tmp"; do
+	mkdir -p "$d" 2>/dev/null || continue
+	[ -w "$d" ] || continue
+	TMP="$d/autoroot.py"
+	break
+done
+[ -n "$TMP" ] || TMP="$(mktemp 2>/dev/null || echo "/tmp/autoroot.$$.py")"
+rm -f "$TMP" 2>/dev/null
 if ! download "$URL" "$TMP" || [ ! -s "$TMP" ]; then
 	say "[-] could not download autoroot.py"
 	exit 1
