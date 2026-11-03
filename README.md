@@ -5,8 +5,8 @@ script, with environment checks and per-command timeouts.
 
 **Use only on a disposable VM you own.** Some modules are unverified public
 repos; some can crash the kernel. A child exploit cannot elevate the parent
-Python process, so use a module that leaves a SUID shell or run the exploit
-interactively.
+Python process: use a module that leaves a SUID shell, or run the module with
+`--raw` so an interactive root shell stays attached to your terminal.
 
 ## Usage
 
@@ -15,6 +15,7 @@ python3 autoroot.py
 python3 autoroot.py --list
 python3 autoroot.py --only pwnkit
 python3 autoroot.py --timeout 90
+python3 autoroot.py --raw --only dirtypipe
 python3 autoroot.py --allow-untrusted --labs
 python3 autoroot.py --dry-run
 ```
@@ -24,7 +25,9 @@ python3 autoroot.py --dry-run
 - `--safe` - honour kernel/distro compatibility checks.
 - `--only KEY` - run one module.
 - `--dry-run` - print commands without executing.
-- `--verbose` - show every command and full output.
+- `--verbose` - show every command and its captured output.
+- `--raw` - stream exploit output live. Needed when a module spawns an
+  interactive root shell; also the noisy mode.
 - `--color auto|always|never` - ANSI color mode.
 - `--allow-untrusted` - enable `curl | python3` payloads from unknown hosts.
 - `--labs` - include Docker/service lab modules.
@@ -54,17 +57,36 @@ compile-based modules will skip; there is no userspace trick around that.
 
 ## Output
 
-Default output is compact: a THISCITZE banner, environment line, one block per
-applicable module, and a summary. Modules that are not applicable are grouped
-under `SKIPPED` with a one-line reason instead of a full block. Use
-`--verbose` to see every command and full output.
+Default output is quiet and compact: banner, environment line, one status line
+per module, then a summary.
+
+```
+  ✔ recon                  recon
+  ✘ pwnkit                 pkexec yok veya SUID degil
+  ★ dirtypipe              uid=0(root) gid=0(root)
+  ran=30  failed=18  skipped=0  root=1
+```
+
+- Every exploit command runs with `stdin=/dev/null`, `stdout+stderr` piped, so
+  compiler noise, BPF verifier dumps, `su` usage text and `tar` warnings never
+  reach the terminal. They go to the log file instead.
+- Full transcript: `~/.cache/autoroot/autoroot-YYYYmmdd-HHMMSS.log` (printed
+  at the end; falls back to `/dev/shm` or the system temp dir).
+- When a module's output proves root (`uid=0(root)`, "root shell", ...), it is
+  listed with `★` in the run and under `SUMMARY -> ROOT`, and autoroot prints
+  the exact follow-up command:
+  `./autoroot --raw --only <key>`.
+- `--verbose` prints each command plus its captured output under the status
+  line. `--raw` gives the child process the real terminal (interactive root
+  shells work, output is unfiltered).
 
 ```bash
 python3 autoroot.py --color always
 python3 autoroot.py --verbose
+python3 autoroot.py --raw --only dirtypipe
 ```
 
-Colors: green = success, yellow = skipped/unverified, red = failed/blocked.
+Colors: green = ran/ok, red = failed/blocked, dim = skipped, bold = root.
 `--color auto` (default) colors only when stdout is a TTY.
 
 ## git/curl/python fallbacks
@@ -161,7 +183,15 @@ wget -qO- https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh
   not verified. Enable only inside an isolated VM.
 - Many CVE-2026 entries are unverified public repos. Treat their titles as
   claims, not facts.
-- The runner writes to `/tmp/autoroot.*`; remove it when done.
+- Root attribution is output-based: a module is marked `★` when its stdout
+  contains a root proof line. Check the evidence line and the log before
+  trusting it.
+- `--raw` disables output capture, so the terminal shows everything the
+  exploit prints (including `su` usage spam and kernel splats). It is the only
+  mode where a spawn-a-shell exploit can hand you an interactive root prompt.
+- The runner writes its workdir under `~/.cache/autoroot`, `/dev/shm` or
+  `/tmp`; the transcript goes to `~/.cache/autoroot/autoroot-*.log`. Remove
+  both when done.
 
 ## Suggested lab flow
 

