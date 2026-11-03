@@ -1226,8 +1226,12 @@ def run_module(mod: Module) -> None:
         mod.reason = "untrusted (use --allow-untrusted)"
         return
     if mod.post and not root():
-        mod.skipped = True
-        mod.reason = "post step requires root"
+        if FORCE:
+            mod.failed = True
+            mod.reason = "post step requires root"
+        else:
+            mod.skipped = True
+            mod.reason = "post step requires root"
         return
 
     CAPTURE = []
