@@ -404,6 +404,7 @@ def _probe_compiler(cc_cmd):
     """Compile-only probe: no-exec work dirs still count as success."""
     src = os.path.join(WORK, ".cc_probe.c")
     out = os.path.join(WORK, ".cc_probe")
+    ok_probe = False
     try:
         with open(src, "w", encoding="ascii") as fh:
             fh.write("int main(void){return 0;}\n")
@@ -413,19 +414,20 @@ def _probe_compiler(cc_cmd):
             cwd=WORK, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    log_write("probe: %s\n%s\n[rc=%d]\n"
-              % (cc_cmd, text_of(proc.stdout), proc.returncode))
-    try:
-        ok_probe = proc.returncode == 0 and os.path.getsize(out) > 0
-    except OSError:
-        ok_probe = False
-    for path in (src, out):
+        log_write("probe: %s\n%s\n[rc=%d]\n"
+                  % (cc_cmd, text_of(proc.stdout), proc.returncode))
         try:
-            os.remove(path)
+            ok_probe = proc.returncode == 0 and os.path.getsize(out) > 0
         except OSError:
-            pass
+            ok_probe = False
+    except (OSError, subprocess.TimeoutExpired):
+        ok_probe = False
+    finally:
+        for path in (src, out):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
     return ok_probe
 
 
