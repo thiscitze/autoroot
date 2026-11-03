@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Bootstrap autoroot when python3 is missing.
+# Bootstrap autoroot when python3 is missing or too old.
 # Usage: curl -fsSL .../bootstrap.sh | bash
 set -uo pipefail
 
 PY=""
-for c in python3 python; do
-	if command -v "$c" >/dev/null 2>&1; then
-		PY="$c"
-		break
-	fi
-done
+find_python() {
+	for c in python3 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python; do
+		if command -v "$c" >/dev/null 2>&1; then
+			if "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' >/dev/null 2>&1; then
+				PY="$c"
+				return 0
+			fi
+		fi
+	done
+	return 1
+}
 
-if [ -z "$PY" ]; then
-	echo "[*] python missing; trying package manager (sudo -n)"
+if ! find_python; then
+	echo "[*] python 3.6+ missing; trying package manager (sudo -n)"
 	if command -v apt-get >/dev/null 2>&1; then
 		sudo -n apt-get update && sudo -n apt-get install -y python3
 	elif command -v dnf >/dev/null 2>&1; then
@@ -26,19 +31,15 @@ if [ -z "$PY" ]; then
 	elif command -v zypper >/dev/null 2>&1; then
 		sudo -n zypper install -y python3
 	fi
-	for c in python3 python; do
-		if command -v "$c" >/dev/null 2>&1; then
-			PY="$c"
-			break
-		fi
-	done
+	find_python || true
 fi
 
 if [ -z "$PY" ]; then
-	echo "[-] python3 is missing and could not be installed"
+	echo "[-] python 3.6+ is missing and could not be installed"
 	exit 1
 fi
 
+echo "[*] using $PY ($($PY --version 2>&1))"
 URL="https://raw.githubusercontent.com/thiscitze/autoroot/main/autoroot.py"
 TMP="$(mktemp)"
 if command -v curl >/dev/null 2>&1; then

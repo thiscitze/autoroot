@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 autoroot - lab privilege-escalation runner.
 
@@ -13,8 +13,6 @@ Usage:
   python3 autoroot.py --yes --only pwnkit
   python3 autoroot.py --yes --allow-untrusted --labs
 """
-
-from __future__ import annotations
 
 import argparse
 import io
@@ -37,7 +35,6 @@ import tempfile
 import textwrap
 import time
 import urllib.request
-from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
 # terminal
@@ -211,7 +208,13 @@ def ensure_tools() -> None:
 
 
 
-def git_clone(url: str, dest: str, cwd: str | None = None) -> int:
+def strip_suffix(value, suffix):
+    if suffix and value.endswith(suffix):
+        return value[:-len(suffix)]
+    return value
+
+
+def git_clone(url, dest, cwd=None):
     target = os.path.join(cwd or WORK, dest)
     if have("git"):
         try:
@@ -223,7 +226,7 @@ def git_clone(url: str, dest: str, cwd: str | None = None) -> int:
             return 1
 
     log(warn("      git missing; using tarball fallback"))
-    base = url.rstrip("/").removesuffix(".git")
+    base = strip_suffix(url.rstrip("/"), ".git")
     for branch in ("main", "master"):
         tar_url = f"{base}/archive/refs/heads/{branch}.tar.gz"
         try:
@@ -249,7 +252,7 @@ def git_clone(url: str, dest: str, cwd: str | None = None) -> int:
     return 1
 
 
-def download(url: str, dest: str, cwd: str | None = None) -> int:
+def download(url, dest, cwd=None):
     target = os.path.join(cwd or WORK, dest)
     if have("curl"):
         try:
@@ -271,8 +274,7 @@ def download(url: str, dest: str, cwd: str | None = None) -> int:
         return 1
 
 
-def sh(cmd: str, desc: str = "", cwd: str | None = None,
-       timeout: int | None = None) -> int:
+def sh(cmd, desc="", cwd=None, timeout=None):
     if VERBOSE or DRY:
         if desc:
             log(f"    {desc}")
@@ -288,7 +290,7 @@ def sh(cmd: str, desc: str = "", cwd: str | None = None,
         if args:
             url = args[0]
             dest = (args[1] if len(args) > 1
-                    else os.path.basename(url.rstrip("/")).removesuffix(".git"))
+                    else strip_suffix(os.path.basename(url.rstrip("/")), ".git"))
             return git_clone(url, dest, cwd)
 
     if stripped.startswith("curl ") and not have("curl"):
@@ -340,20 +342,21 @@ def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def capture(cmd: str, cwd: str | None = None, timeout: int = 20) -> str:
+def capture(cmd, cwd=None, timeout=20):
     try:
         return subprocess.run(
             ["bash", "-c", cmd],
             cwd=cwd or WORK,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
             timeout=timeout,
         ).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
 
-def user_groups() -> set[str]:
+def user_groups():
     names = set()
     if grp is None or pwd is None:
         return names
@@ -406,7 +409,7 @@ def distro_id() -> str:
     return os_release().get("ID", "").lower()
 
 
-def has_suid(path: str | None) -> bool:
+def has_suid(path):
     if not path:
         return False
     try:
@@ -419,7 +422,8 @@ def packagekit_present() -> bool:
     if not have("dpkg"):
         return False
     try:
-        out = subprocess.run(["dpkg", "-l"], capture_output=True, text=True,
+        out = subprocess.run(["dpkg", "-l"], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, universal_newlines=True,
                              timeout=15).stdout.lower()
         return "packagekit" in out
     except (OSError, subprocess.TimeoutExpired):
@@ -439,21 +443,22 @@ def openvswitch_present() -> bool:
 # modules
 # ---------------------------------------------------------------------------
 
-@dataclass
 class Module:
-    key: str
-    title: str
-    check: str
-    fn: callable
-    untrusted: bool = False
-    post: bool = False
-    lab: bool = False
-    ran: bool = False
-    skipped: bool = False
-    failed: bool = False
+    def __init__(self, key, title, check, fn, untrusted=False, post=False,
+                 lab=False):
+        self.key = key
+        self.title = title
+        self.check = check
+        self.fn = fn
+        self.untrusted = untrusted
+        self.post = post
+        self.lab = lab
+        self.ran = False
+        self.skipped = False
+        self.failed = False
 
 
-MODULES: list[Module] = []
+MODULES = []
 
 
 def module(key, title, check, untrusted=False, post=False, lab=False):
@@ -700,7 +705,7 @@ GTFOBINS = {
 }
 
 
-def find_suid() -> list[str]:
+def find_suid():
     out = capture(
         "find / -xdev -perm -4000 -type f 2>/dev/null | head -200",
         timeout=35,
@@ -1378,5 +1383,8 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+
 
 

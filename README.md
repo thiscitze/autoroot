@@ -11,16 +11,16 @@ interactively.
 ## Usage
 
 ```bash
+python3 autoroot.py
 python3 autoroot.py --list
-python3 autoroot.py --yes
-python3 autoroot.py --yes --only pwnkit
-python3 autoroot.py --yes --timeout 90
-python3 autoroot.py --yes --allow-untrusted --labs
+python3 autoroot.py --only pwnkit
+python3 autoroot.py --timeout 90
+python3 autoroot.py --allow-untrusted --labs
 python3 autoroot.py --dry-run
 ```
 
+- No flags: run all safe modules.
 - `--list` - show modules and flags.
-- `--yes` - required to run anything.
 - `--only KEY` - run one module.
 - `--dry-run` - print commands without executing.
 - `--verbose` - show every command and full output.
@@ -29,6 +29,8 @@ python3 autoroot.py --dry-run
 - `--labs` - include Docker/service lab modules.
 - `--timeout N` - per-command timeout (default 45s; 0 = no timeout).
 - `--allow-untrusted` is off by default.
+- Requires Linux and Python 3.6+. If Python is older/missing, use
+  `bootstrap.sh`.
 
 ## GCC and permission bypasses
 
